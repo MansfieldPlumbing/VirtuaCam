@@ -1,10 +1,6 @@
 # VirtuaCam
 A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
 
-Of course. Here is a comprehensive README.md file for your DirectPort VirtuaCam GitHub repository. It explains the project's purpose, architecture, features, and provides clear instructions for building and using it.
-
-DirectPort VirtuaCam
-
 ![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![alt text](https://img.shields.io/badge/Platform-Windows-blue.svg)
 ![alt text](https://img.shields.io/badge/Language-C%2B%2B-orange.svg)

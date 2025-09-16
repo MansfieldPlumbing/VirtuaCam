@@ -8,7 +8,6 @@ A modern C++ virtual camera for Windows featuring a decoupled producer-consumer 
 
 https://github.com/user-attachments/assets/dcb07db4-05e8-4adb-8941-7a8e131e7598
 
-<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
 
 A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
 
@@ -23,6 +22,8 @@ The data flow is as follows:
 [Your App (Producer)] ---> [Shared D3D11 Texture & Fence] ---> [VirtuaCam DLL (Consumer)] ---> [Zoom, Teams, OBS, etc.]
 
 This architecture is ideal for applications like game streaming, creative coding, real-time video filters, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed with minimal performance impact.
+
+<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
 
 Key Features
 

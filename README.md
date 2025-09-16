@@ -1,5 +1,5 @@
 # VirtuaCam
-A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
+## A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
 
 ![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![alt text](https://img.shields.io/badge/Platform-Windows-blue.svg)
@@ -8,10 +8,7 @@ A modern C++ virtual camera for Windows featuring a decoupled producer-consumer 
 
 https://github.com/user-attachments/assets/dcb07db4-05e8-4adb-8941-7a8e131e7598
 
-
-A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
-
-Core Concept
+## Core Concept
 
 DirectPort VirtuaCam is not a self-contained camera that generates its own video. Instead, it acts as a high-performance transport system that exposes a video feed from another application as a standard webcam on your system.
 
@@ -23,9 +20,8 @@ The data flow is as follows:
 
 This architecture is ideal for applications like game streaming, creative coding, real-time video filters, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed with minimal performance impact.
 
-<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
 
-Key Features
+## Key Features
 
 High-Performance Zero-Copy Transfer: Video frames are shared between processes entirely on the GPU using DirectX 11 shared resources. This results in minimal latency and CPU overhead.
 
@@ -39,7 +35,10 @@ Hardware-Accelerated Preview: An on-demand preview window can be toggled from th
 
 Modern C++ Implementation: Built with modern C++ and robust Windows libraries like WIL and C++/WinRT for stability and maintainability.
 
-Project Components
+<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
+
+
+## Project Components
 
 The solution is divided into three main parts:
 
@@ -49,7 +48,8 @@ This is the core virtual camera source, implemented as a COM DLL. It registers i
 DirectPortVirtuaCamEXE (The Controller)
 A lightweight Win32 application that runs in the system tray. It allows the user to enable or disable the virtual camera and toggle the preview window. It communicates with the DLL via a custom COM interface.
 
-Building the Project
+## Building the Project
+
 Prerequisites
 
 Visual Studio 2022 (or later) with the "Desktop development with C++" workload.
@@ -62,13 +62,11 @@ Build Steps
 
 Clone the repository.
 
-Open the DirectPortVirtuaCam.sln solution file in Visual Studio.
+Run the provided Build script
 
 Select the desired configuration (e.g., Release, x64).
 
-Build the solution (Build > Build Solution). This will produce DirectPortVirtuaCamDLL.dll, DirectPortVirtuaCamEXE.exe, and example.exe.
-
-How to Use
+## How to Use
 
 Register the DLL: After building, you must register the COM server. Open a command prompt as an Administrator and run:
 
@@ -84,7 +82,7 @@ Select in Application: Open an application like the Windows Camera App, Zoom, or
 
 To disable the camera, right-click the tray icon and select "Disable Virtual Camera" or "Exit".
 
-For Developers: Creating Your Own Producer
+## For Developers: Creating Your Own Producer
 
 To make your own application a source for DirectPort VirtuaCam, you must implement the producer protocol:
 
@@ -114,11 +112,11 @@ Update the frameValue in the shared manifest to notify consumers that a new fram
 
 Refer to example.cpp for a complete, working implementation.
 
-License
+## License
 
-This project is licensed under the MIT License.
+## This project is licensed under the MIT License.
 
-Copyright (c) [2025] [https://github.com/MansfieldPlumbing]
+## Copyright (c) [2025] [https://github.com/MansfieldPlumbing]
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 

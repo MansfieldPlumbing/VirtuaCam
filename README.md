@@ -5,6 +5,11 @@ A modern C++ virtual camera for Windows featuring a decoupled producer-consumer 
 ![alt text](https://img.shields.io/badge/Platform-Windows-blue.svg)
 ![alt text](https://img.shields.io/badge/Language-C%2B%2B-orange.svg)
 
+
+https://github.com/user-attachments/assets/dcb07db4-05e8-4adb-8941-7a8e131e7598
+
+<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
+
 A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
 
 Core Concept

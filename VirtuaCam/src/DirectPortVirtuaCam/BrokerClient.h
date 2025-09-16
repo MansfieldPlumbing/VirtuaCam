@@ -1,6 +1,8 @@
 #pragma once
 #include <chrono>
 #include <d3d11_4.h>
+#include <DirectXMath.h>
+#include "App.h"
 
 struct ProducerConnection
 {
@@ -12,8 +14,6 @@ struct ProducerConnection
     wil::com_ptr_nothrow<ID3D11Fence>      sharedFence;
     UINT64                         lastSeenFrame = 0;
 };
-
-enum class BrokerState { Searching, Connected, Failed };
 
 class BrokerClient
 {
@@ -40,7 +40,7 @@ class BrokerClient
     HRESULT FindAndConnectToBroker();
     void DisconnectFromProducer();
     HRESULT CreateBlitResources();
-
+    
 public:
     BrokerClient() :
         _width(0),
@@ -61,6 +61,7 @@ public:
         }
     }
 
+    HRESULT ReconfigureFormat(UINT width, UINT height);
     HRESULT SetD3DManager(IUnknown* manager, UINT width, UINT height);
     const bool HasD3DManager() const { return _dxgiManager != nullptr; }
     HRESULT Generate(IMFSample* sample, REFGUID format, IMFSample** outSample);

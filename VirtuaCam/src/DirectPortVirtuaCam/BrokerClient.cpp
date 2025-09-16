@@ -1,10 +1,13 @@
 #include "pch.h"
-#include "Tools.h"
+#include "Tools.h" 
 #include "BrokerClient.h"
 #include <tlhelp32.h>
 #include <d3dcompiler.h>
+#include <DirectXMath.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
+
+using namespace DirectX;
 
 const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 
@@ -13,6 +16,7 @@ struct VS_OUTPUT {
     float4 Pos : SV_POSITION;
     float2 Tex : TEXCOORD;
 };
+
 VS_OUTPUT main(uint id : SV_VertexID) {
     VS_OUTPUT output;
     output.Tex = float2((id << 1) & 2, id & 2);
@@ -32,6 +36,45 @@ float4 main(VS_OUTPUT input) : SV_TARGET {
     return g_texture.Sample(g_sampler, input.Tex);
 }
 )";
+
+HRESULT BrokerClient::ReconfigureFormat(UINT width, UINT height)
+{
+    RETURN_HR_IF(E_UNEXPECTED, !_dxgiManager);
+
+    wil::com_ptr_nothrow<ID3D11Device> device;
+    RETURN_IF_FAILED(_dxgiManager->GetVideoService(_deviceHandle, IID_PPV_ARGS(&device)));
+
+    _texture.reset();
+    _textureRTV.reset();
+    _converter.reset();
+
+    CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 1, 1, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    RETURN_IF_FAILED(device->CreateTexture2D(&desc, nullptr, &_texture));
+    RETURN_IF_FAILED(device->CreateRenderTargetView(_texture.get(), nullptr, &_textureRTV));
+    _width = width; _height = height;
+
+    RETURN_IF_FAILED(CoCreateInstance(CLSID_VideoProcessorMFT, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&_converter)));
+    
+    wil::com_ptr_nothrow<IMFMediaType> iType;
+    RETURN_IF_FAILED(MFCreateMediaType(&iType));
+    iType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    iType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+    MFSetAttributeSize(iType.get(), MF_MT_FRAME_SIZE, width, height);
+    RETURN_IF_FAILED(_converter->SetInputType(0, iType.get(), 0));
+
+    wil::com_ptr_nothrow<IMFMediaType> oType;
+    RETURN_IF_FAILED(MFCreateMediaType(&oType));
+    oType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    oType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    MFSetAttributeSize(oType.get(), MF_MT_FRAME_SIZE, width, height);
+    RETURN_IF_FAILED(_converter->SetOutputType(0, oType.get(), 0));
+
+    wil::com_ptr_nothrow<IUnknown> manager;
+    _dxgiManager.query_to(&manager);
+    RETURN_IF_FAILED(_converter->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)manager.get()));
+
+    return S_OK;
+}
 
 void BrokerClient::DisconnectFromProducer()
 {
@@ -64,6 +107,7 @@ HRESULT BrokerClient::CreateBlitResources()
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
     RETURN_IF_FAILED(device->CreateSamplerState(&sampDesc, &_blitSampler));
+
     return S_OK;
 }
 
@@ -129,25 +173,8 @@ HRESULT BrokerClient::SetD3DManager(IUnknown* manager, UINT width, UINT height)
     RETURN_IF_FAILED(manager->QueryInterface(&_dxgiManager));
     if(_deviceHandle) { _dxgiManager->CloseDeviceHandle(_deviceHandle); _deviceHandle = nullptr; }
     RETURN_IF_FAILED(_dxgiManager->OpenDeviceHandle(&_deviceHandle));
-    wil::com_ptr_nothrow<ID3D11Device> device;
-    RETURN_IF_FAILED(_dxgiManager->GetVideoService(_deviceHandle, IID_PPV_ARGS(&device)));
-    CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 1, 1, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
-    RETURN_IF_FAILED(device->CreateTexture2D(&desc, nullptr, &_texture));
-    RETURN_IF_FAILED(device->CreateRenderTargetView(_texture.get(), nullptr, &_textureRTV));
-    _width = width; _height = height;
-    RETURN_IF_FAILED(CoCreateInstance(CLSID_VideoProcessorMFT, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&_converter)));
-    wil::com_ptr_nothrow<IMFMediaType> iType;
-    RETURN_IF_FAILED(MFCreateMediaType(&iType));
-    iType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video); iType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-    MFSetAttributeSize(iType.get(), MF_MT_FRAME_SIZE, width, height);
-    RETURN_IF_FAILED(_converter->SetInputType(0, iType.get(), 0));
-    wil::com_ptr_nothrow<IMFMediaType> oType;
-    RETURN_IF_FAILED(MFCreateMediaType(&oType));
-    oType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video); oType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    MFSetAttributeSize(oType.get(), MF_MT_FRAME_SIZE, width, height);
-    RETURN_IF_FAILED(_converter->SetOutputType(0, oType.get(), 0));
-    RETURN_IF_FAILED(_converter->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)manager));
-    return S_OK;
+    
+    return ReconfigureFormat(width, height);
 }
 
 HRESULT BrokerClient::Generate(IMFSample* sample, REFGUID format, IMFSample** outSample)
@@ -175,12 +202,13 @@ HRESULT BrokerClient::Generate(IMFSample* sample, REFGUID format, IMFSample** ou
         D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)_width, (float)_height, 0.0f, 1.0f };
         context->RSSetViewports(1, &vp);
         context->OMSetRenderTargets(1, _textureRTV.addressof(), nullptr);
+
         context->VSSetShader(_blitVS.get(), nullptr, 0);
         context->PSSetShader(_blitPS.get(), nullptr, 0);
         context->PSSetShaderResources(0, 1, _producerSRV.addressof());
         context->PSSetSamplers(0, 1, _blitSampler.addressof());
         context->IASetInputLayout(nullptr);
-        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->Draw(3, 0);
 
     } else {

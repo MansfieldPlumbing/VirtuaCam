@@ -10,7 +10,11 @@
 #include <d3dcompiler.h>
 #include <d3d12.h>
 #include <tlhelp32.h>
+#include <mutex>
 #include "wil/resource.h"
+#include "App.h"
+#include "Tools.h"
+#include "Formats.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -22,21 +26,18 @@ using namespace Microsoft::WRL;
 
 #define BROKER_API __declspec(dllexport)
 
+void DisconnectFromProducer();
+HRESULT AttemptConnection(DWORD pid);
+
 void Log(const std::wstring& msg) {
     WCHAR buffer[1024];
     wsprintfW(buffer, L"[PID:%lu][VirtuaCastBroker-Passthrough] %s\n", GetCurrentProcessId(), msg.c_str());
     OutputDebugStringW(buffer);
 }
 
-struct BroadcastManifest {
-    UINT64 frameValue; UINT width; UINT height; DXGI_FORMAT format;
-    LUID adapterLuid; WCHAR textureName[256]; WCHAR fenceName[256];
-};
-
 struct ProducerConnection {
     bool isConnected = false;
     DWORD producerPid = 0;
-    WCHAR producerName[MAX_PATH] = {};
     HANDLE hManifest = nullptr;
     BroadcastManifest* pManifestView = nullptr;
     ComPtr<ID3D11Texture2D> sharedTexture;
@@ -46,8 +47,7 @@ struct ProducerConnection {
     ComPtr<ID3D11ShaderResourceView> privateSRV;
 };
 
-enum class BrokerState { Searching, Connected, Failed };
-
+static BrokerState g_brokerState = BrokerState::Searching;
 static ComPtr<ID3D11Device> g_device;
 static ComPtr<ID3D11Device1> g_device1;
 static ComPtr<ID3D11Device5> g_device5;
@@ -60,8 +60,9 @@ static ComPtr<ID3D11PixelShader> g_blitPS;
 static ComPtr<ID3D11SamplerState> g_blitSampler;
 
 static ProducerConnection g_inputProducer;
-static BrokerState g_brokerState = BrokerState::Searching;
-static auto g_lastProducerSearchTime = std::chrono::steady_clock::now();
+static std::vector<DWORD> g_producerPriorityList;
+static DWORD g_preferredPID = 0;
+static std::mutex g_producerListMutex;
 
 const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 static ComPtr<ID3D11Texture2D> g_sharedTex_Out;
@@ -96,11 +97,9 @@ float4 main(VS_OUTPUT input) : SV_TARGET {
     return g_texture.Sample(g_sampler, input.Tex);
 })";
 
-void DisconnectFromProducer();
-
 HANDLE GetHandleFromName(const WCHAR* name) {
     ComPtr<ID3D12Device> d3d12Device;
-    D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12Device));
+    D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(d3d12Device.GetAddressOf()));
     if (!d3d12Device) return NULL;
     HANDLE handle = nullptr;
     d3d12Device->OpenSharedHandleByName(name, GENERIC_ALL, &handle);
@@ -115,7 +114,6 @@ void ShutdownSharing() {
     g_pManifestView_Out = nullptr; g_hManifest_Out = nullptr;
     g_sharedNTHandle_Out = nullptr; g_sharedFenceHandle_Out = nullptr;
     g_sharedTex_Out.Reset(); g_sharedFence_Out.Reset(); g_sharedTexRTV_Out.Reset();
-    Log(L"Broker output stream has been shut down.");
 }
 
 HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
@@ -124,14 +122,14 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     td.ArraySize = 1; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
-    HRESULT hr = g_device->CreateTexture2D(&td, nullptr, &g_sharedTex_Out);
-    if (FAILED(hr)) { Log(L"Failed to create shared texture"); return hr; }
+    HRESULT hr = g_device->CreateTexture2D(&td, nullptr, g_sharedTex_Out.GetAddressOf());
+    if (FAILED(hr)) { return hr; }
 
-    hr = g_device->CreateRenderTargetView(g_sharedTex_Out.Get(), nullptr, &g_sharedTexRTV_Out);
-    if (FAILED(hr)) { Log(L"Failed to create RTV for shared texture"); return hr; }
+    hr = g_device->CreateRenderTargetView(g_sharedTex_Out.Get(), nullptr, g_sharedTexRTV_Out.GetAddressOf());
+    if (FAILED(hr)) { return hr; }
 
-    hr = g_device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedFence_Out));
-    if (FAILED(hr)) { Log(L"Failed to create shared fence"); return hr; }
+    hr = g_device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(g_sharedFence_Out.GetAddressOf()));
+    if (FAILED(hr)) { return hr; }
 
     PSECURITY_DESCRIPTOR sd = nullptr;
     ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;WD)(A;;GA;;;AC)", SDDL_REVISION_1, &sd, NULL);
@@ -157,9 +155,9 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     ZeroMemory(g_pManifestView_Out, sizeof(BroadcastManifest));
     g_pManifestView_Out->width = width; g_pManifestView_Out->height = height;
     g_pManifestView_Out->format = format; g_pManifestView_Out->adapterLuid = g_adapterLuid;
+    g_pManifestView_Out->command = VCamCommand::None;
     wcscpy_s(g_pManifestView_Out->textureName, _countof(g_pManifestView_Out->textureName), textureName);
     wcscpy_s(g_pManifestView_Out->fenceName, _countof(g_pManifestView_Out->fenceName), fenceName);
-    Log(L"Broker output stream created successfully.");
     return S_OK;
 }
 
@@ -178,16 +176,16 @@ HRESULT CreateBlitResources() {
     ComPtr<ID3DBlob> vsBlob;
     ComPtr<ID3DBlob> psBlob;
     HRESULT hr = D3DCompile(g_BlitVertexShader, strlen(g_BlitVertexShader), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBlob, nullptr);
-    if (FAILED(hr)) { Log(L"Failed to compile vertex shader."); return hr; }
+    if (FAILED(hr)) { return hr; }
     
     hr = D3DCompile(g_BlitPixelShader, strlen(g_BlitPixelShader), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &psBlob, nullptr);
-    if (FAILED(hr)) { Log(L"Failed to compile pixel shader."); return hr; }
+    if (FAILED(hr)) { return hr; }
 
-    hr = g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_blitVS);
-    if (FAILED(hr)) { Log(L"Failed to create vertex shader."); return hr; }
+    hr = g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, g_blitVS.GetAddressOf());
+    if (FAILED(hr)) { return hr; }
     
-    hr = g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_blitPS);
-    if (FAILED(hr)) { Log(L"Failed to create pixel shader."); return hr; }
+    hr = g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, g_blitPS.GetAddressOf());
+    if (FAILED(hr)) { return hr; }
     
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -197,97 +195,9 @@ HRESULT CreateBlitResources() {
     sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
-    hr = g_device->CreateSamplerState(&sampDesc, &g_blitSampler);
-    if(FAILED(hr)) { Log(L"Failed to create sampler state."); return hr; }
-
-    Log(L"Blit resources created successfully.");
+    hr = g_device->CreateSamplerState(&sampDesc, g_blitSampler.GetAddressOf());
+    if(FAILED(hr)) { return hr; }
     return S_OK;
-}
-
-void FindAndConnectToProducer() {
-    if (g_inputProducer.isConnected) {
-        HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, g_inputProducer.producerPid);
-        if (hProcess == NULL || WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
-            Log(L"Upstream producer process has exited. Disconnecting.");
-            DisconnectFromProducer();
-        }
-        if (hProcess) CloseHandle(hProcess);
-        return;
-    }
-
-    auto now = std::chrono::steady_clock::now();
-    if (now - g_lastProducerSearchTime < std::chrono::seconds(2)) {
-        return;
-    }
-    g_lastProducerSearchTime = now;
-    g_brokerState = BrokerState::Searching;
-
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) return;
-    
-    PROCESSENTRY32W pe32 = {};
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    DWORD selfPid = GetCurrentProcessId();
-
-    if (Process32FirstW(hSnapshot, &pe32)) {
-        do {
-            if (pe32.th32ProcessID == selfPid) continue;
-
-            const std::vector<std::wstring> producerSignatures = { L"DirectPort_Producer_Manifest_" };
-            HANDLE hManifest = nullptr;
-            for (const auto& sig : producerSignatures) {
-                 std::wstring manifestName = sig + std::to_wstring(pe32.th32ProcessID);
-                 hManifest = OpenFileMappingW(FILE_MAP_READ, FALSE, manifestName.c_str());
-                 if (hManifest) break;
-            }
-            if (!hManifest) continue;
-
-            BroadcastManifest* pManifestView = (BroadcastManifest*)MapViewOfFile(hManifest, FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
-            if (!pManifestView) { CloseHandle(hManifest); continue; }
-
-            if (memcmp(&pManifestView->adapterLuid, &g_adapterLuid, sizeof(LUID)) != 0) {
-                UnmapViewOfFile(pManifestView); CloseHandle(hManifest); continue;
-            }
-
-            ComPtr<ID3D11Texture2D> tempTexture;
-            ComPtr<ID3D11Fence> tempFence;
-            {
-                wil::unique_handle hTexture(GetHandleFromName(pManifestView->textureName));
-                wil::unique_handle hFence(GetHandleFromName(pManifestView->fenceName));
-
-                if (!hTexture || FAILED(g_device1->OpenSharedResource1(hTexture.get(), IID_PPV_ARGS(&tempTexture)))) {
-                    UnmapViewOfFile(pManifestView); CloseHandle(hManifest); continue;
-                }
-                if (!hFence || FAILED(g_device5->OpenSharedFence(hFence.get(), IID_PPV_ARGS(&tempFence)))) {
-                    UnmapViewOfFile(pManifestView); CloseHandle(hManifest); continue;
-                }
-            }
-
-            Log(L"Connected to upstream producer PID: " + std::to_wstring(pe32.th32ProcessID));
-            g_inputProducer.producerPid = pe32.th32ProcessID;
-            wcscpy_s(g_inputProducer.producerName, _countof(g_inputProducer.producerName), pe32.szExeFile);
-            g_inputProducer.hManifest = hManifest;
-            g_inputProducer.pManifestView = pManifestView;
-            g_inputProducer.sharedTexture = tempTexture;
-            g_inputProducer.sharedFence = tempFence;
-            
-            D3D11_TEXTURE2D_DESC sharedDesc;
-            tempTexture->GetDesc(&sharedDesc);
-            sharedDesc.MiscFlags = 0;
-            sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            sharedDesc.Usage = D3D11_USAGE_DEFAULT;
-            g_device->CreateTexture2D(&sharedDesc, nullptr, &g_inputProducer.privateTexture);
-            g_device->CreateShaderResourceView(g_inputProducer.privateTexture.Get(), nullptr, &g_inputProducer.privateSRV);
-
-            g_inputProducer.isConnected = true;
-            g_brokerState = BrokerState::Connected;
-            CloseHandle(hSnapshot);
-            return;
-
-        } while (Process32NextW(hSnapshot, &pe32));
-    }
-    CloseHandle(hSnapshot);
-    g_brokerState = BrokerState::Failed;
 }
 
 void DisconnectFromProducer() {
@@ -296,14 +206,82 @@ void DisconnectFromProducer() {
     if (g_inputProducer.hManifest) CloseHandle(g_inputProducer.hManifest);
     g_inputProducer = {};
     g_brokerState = BrokerState::Searching;
-    Log(L"Disconnected from upstream producer.");
+}
+
+HRESULT AttemptConnection(DWORD pid) {
+    DisconnectFromProducer();
+    std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
+    HANDLE hManifest = OpenFileMappingW(FILE_MAP_READ, FALSE, manifestName.c_str());
+    if (!hManifest) return E_FAIL;
+
+    BroadcastManifest* pManifestView = (BroadcastManifest*)MapViewOfFile(hManifest, FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
+    if (!pManifestView) { CloseHandle(hManifest); return E_FAIL; }
+
+    if (memcmp(&pManifestView->adapterLuid, &g_adapterLuid, sizeof(LUID)) != 0) {
+        UnmapViewOfFile(pManifestView); CloseHandle(hManifest); return E_FAIL;
+    }
+
+    ComPtr<ID3D11Texture2D> tempTexture;
+    ComPtr<ID3D11Fence> tempFence;
+    wil::unique_handle hTexture(GetHandleFromName(pManifestView->textureName));
+    wil::unique_handle hFence(GetHandleFromName(pManifestView->fenceName));
+
+    if (!hTexture || FAILED(g_device1->OpenSharedResource1(hTexture.get(), IID_PPV_ARGS(tempTexture.GetAddressOf())))) {
+        UnmapViewOfFile(pManifestView); CloseHandle(hManifest); return E_FAIL;
+    }
+    if (!hFence || FAILED(g_device5->OpenSharedFence(hFence.get(), IID_PPV_ARGS(tempFence.GetAddressOf())))) {
+        UnmapViewOfFile(pManifestView); CloseHandle(hManifest); return E_FAIL;
+    }
+    
+    g_inputProducer.producerPid = pid;
+    g_inputProducer.hManifest = hManifest;
+    g_inputProducer.pManifestView = pManifestView;
+    g_inputProducer.sharedTexture = tempTexture;
+    g_inputProducer.sharedFence = tempFence;
+    D3D11_TEXTURE2D_DESC sharedDesc;
+    tempTexture->GetDesc(&sharedDesc);
+    sharedDesc.MiscFlags = 0;
+    sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    sharedDesc.Usage = D3D11_USAGE_DEFAULT;
+    g_device->CreateTexture2D(&sharedDesc, nullptr, g_inputProducer.privateTexture.GetAddressOf());
+    g_device->CreateShaderResourceView(g_inputProducer.privateTexture.Get(), nullptr, g_inputProducer.privateSRV.GetAddressOf());
+    g_inputProducer.isConnected = true;
+    g_brokerState = BrokerState::Connected;
+    Log(L"Connected to upstream producer PID: " + std::to_wstring(pid));
+    return S_OK;
+}
+
+void CheckAndManageConnection() {
+    if (g_inputProducer.isConnected) {
+        HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, g_inputProducer.producerPid);
+        if (hProcess == NULL || WaitForSingleObject(hProcess, 0) != WAIT_TIMEOUT) {
+            Log(L"Upstream producer " + std::to_wstring(g_inputProducer.producerPid) + L" has exited. Disconnecting.");
+            DisconnectFromProducer();
+        }
+        if (hProcess) CloseHandle(hProcess);
+        return;
+    }
+
+    g_brokerState = BrokerState::Searching;
+    std::lock_guard<std::mutex> lock(g_producerListMutex);
+    
+    if (g_preferredPID != 0) {
+        if (SUCCEEDED(AttemptConnection(g_preferredPID))) return;
+    }
+    
+    for (DWORD pid : g_producerPriorityList) {
+        if (pid == g_preferredPID) continue;
+        if (SUCCEEDED(AttemptConnection(pid))) return;
+    }
+    
+    g_brokerState = BrokerState::Failed;
 }
 
 extern "C" {
     BROKER_API void InitializeBroker() {
         CoInitializeEx(NULL, COINIT_MULTITHREADED);
         if (SUCCEEDED(InitD3D11_Broker()) && 
-            SUCCEEDED(CreateSharingResources(1280, 720, DXGI_FORMAT_B8G8R8A8_UNORM)) &&
+            SUCCEEDED(CreateSharingResources(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM)) &&
             SUCCEEDED(CreateBlitResources())) {
             Log(L"Broker initialized successfully.");
         } else {
@@ -319,11 +297,26 @@ extern "C" {
         g_blitVS.Reset(); g_blitPS.Reset(); g_blitSampler.Reset();
         CoUninitialize();
     }
+    
+    BROKER_API void UpdateProducerPriorityList(const DWORD* pids, int count) {
+        std::lock_guard<std::mutex> lock(g_producerListMutex);
+        g_producerPriorityList.assign(pids, pids + count);
+    }
+
+    BROKER_API void SetPreferredProducerPID(DWORD pid) {
+        std::lock_guard<std::mutex> lock(g_producerListMutex);
+        if (g_preferredPID != pid) {
+            g_preferredPID = pid;
+            if (g_inputProducer.isConnected && g_inputProducer.producerPid != pid) {
+                DisconnectFromProducer();
+            }
+        }
+    }
 
     BROKER_API void RenderBrokerFrame() {
         if (!g_sharedTex_Out || !g_context || !g_sharedTexRTV_Out) return;
         
-        FindAndConnectToProducer();
+        CheckAndManageConnection();
         
         if (g_inputProducer.isConnected) {
             UINT64 latestFrame = g_inputProducer.pManifestView->frameValue;
@@ -344,7 +337,7 @@ extern "C" {
             g_context->PSSetShaderResources(0, 1, g_inputProducer.privateSRV.GetAddressOf());
             g_context->PSSetSamplers(0, 1, g_blitSampler.GetAddressOf());
             g_context->IASetInputLayout(nullptr);
-            g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            g_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             g_context->Draw(3, 0);
         } else {
             const float blueColor[] = { 0.0f, 0.1f, 0.8f, 1.0f };
@@ -355,6 +348,7 @@ extern "C" {
         g_context4->Signal(g_sharedFence_Out.Get(), g_frameValue_Out);
         if (g_pManifestView_Out) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView_Out->frameValue), g_frameValue_Out);
+            g_pManifestView_Out->command = VCamCommand::None;
         }
     }
 
@@ -368,19 +362,6 @@ extern "C" {
 
     BROKER_API BrokerState GetBrokerState() {
         return g_brokerState;
-    }
-
-    BROKER_API bool GetProducerInfo(DWORD* pid, WCHAR* nameBuffer, UINT bufferSize)
-    {
-        if (g_inputProducer.isConnected && pid != nullptr && nameBuffer != nullptr && bufferSize > 0)
-        {
-            *pid = g_inputProducer.producerPid;
-            wcscpy_s(nameBuffer, bufferSize, g_inputProducer.producerName);
-            return true;
-        }
-        if (pid) *pid = 0;
-        if (nameBuffer && bufferSize > 0) nameBuffer[0] = L'\0';
-        return false;
     }
 }
 

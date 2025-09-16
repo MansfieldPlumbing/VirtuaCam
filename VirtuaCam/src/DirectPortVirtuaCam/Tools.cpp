@@ -321,7 +321,6 @@ HANDLE GetHandleFromName(const WCHAR* name)
     return handle;
 }
 
-// from MFTools.cpp
 void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix)
 {
 	UNREFERENCED_PARAMETER(unknown);

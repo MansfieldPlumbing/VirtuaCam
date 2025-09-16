@@ -2,15 +2,9 @@
 #include "Tools.h"
 #include "Enumerator.h"
 #include "VirtualCamera.h"
+#include "App.h"
+#include "Formats.h"
 
-#define NUM_IMAGE_COLS 1280
-#define NUM_IMAGE_ROWS 720
-
-// +---------------------------------------------------------------- KEEPER ----------------------------------------------------------------
-
-//
-// Activator Implementation
-//
 HRESULT Activator::Initialize()
 {
 	_source = winrt::make_self<MediaSource>();
@@ -45,10 +39,6 @@ STDMETHODIMP Activator::DetachObject()
 	return S_OK;
 }
 
-
-//
-// MediaSource Implementation
-//
 MediaSource::MediaSource() : _streams(_numStreams)
 {
     SetBaseAttributesTraceName(L"MediaSourceAtts");
@@ -87,16 +77,24 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 
 	wil::com_ptr_nothrow<IMFSensorProfileCollection> collection;
 	RETURN_IF_FAILED(MFCreateSensorProfileCollection(&collection));
-
 	DWORD streamId = 0;
 	wil::com_ptr_nothrow<IMFSensorProfile> profile;
-	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_Legacy, 0, nullptr, &profile));
-	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT<=30,1;SUT==))"));
-	RETURN_IF_FAILED(collection->AddProfile(profile.get()));
+
+    RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_VideoConferencing, 0, nullptr, &profile));
+    RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT==30,1;SUT==))"));
+    RETURN_IF_FAILED(collection->AddProfile(profile.get()));
+    profile = nullptr;
 
 	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_HighFrameRate, 0, nullptr, &profile));
 	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT>=60,1;SUT==))"));
 	RETURN_IF_FAILED(collection->AddProfile(profile.get()));
+    profile = nullptr;
+
+	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_Legacy, 0, nullptr, &profile));
+	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT<60,1;SUT==))"));
+	RETURN_IF_FAILED(collection->AddProfile(profile.get()));
+    profile = nullptr;
+
 	RETURN_IF_FAILED(SetUnknown(MF_DEVICEMFT_SENSORPROFILE_COLLECTION, collection.get()));
 
 	try
@@ -386,15 +384,15 @@ STDMETHODIMP_(NTSTATUS) MediaSource::KsEvent(PKSEVENT evt, ULONG length, LPVOID 
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
-//
-// MediaStream Implementation
-//
 HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 {
 	RETURN_HR_IF_NULL(E_POINTER, source);
 	_source = source;
 	_index = index;
-
+    
+    _initialWidth = 1280;
+    _initialHeight = 720;
+    
 	RETURN_IF_FAILED(SetGUID(MF_DEVICESTREAM_STREAM_CATEGORY, PINNAME_VIDEO_CAPTURE));
 	RETURN_IF_FAILED(SetUINT32(MF_DEVICESTREAM_STREAM_ID, index));
 	RETURN_IF_FAILED(SetUINT32(MF_DEVICESTREAM_FRAMESERVER_SHARED, 1));
@@ -402,44 +400,57 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 
-	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
+    std::vector<wil::com_ptr_nothrow<IMFMediaType>> mediaTypes;
+    for (const auto& res : g_supportedResolutions)
+    {
+        for (const auto& fr : g_supportedFrameRates)
+        {
+            {
+                wil::com_ptr_nothrow<IMFMediaType> rgbType;
+                RETURN_IF_FAILED(MFCreateMediaType(&rgbType));
+                rgbType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+                rgbType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+                MFSetAttributeSize(rgbType.get(), MF_MT_FRAME_SIZE, res.width, res.height);
+                rgbType->SetUINT32(MF_MT_DEFAULT_STRIDE, res.width * 4);
+                rgbType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                rgbType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+                MFSetAttributeRatio(rgbType.get(), MF_MT_FRAME_RATE, fr.numerator, fr.denominator);
+                auto bitrate = (uint32_t)(res.width * res.height * 4 * 8 * (fr.numerator / (float)fr.denominator));
+                rgbType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+                MFSetAttributeRatio(rgbType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                mediaTypes.push_back(rgbType);
+            }
 
-	wil::com_ptr_nothrow<IMFMediaType> rgbType;
-	RETURN_IF_FAILED(MFCreateMediaType(&rgbType));
-	rgbType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	rgbType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-	MFSetAttributeSize(rgbType.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-	rgbType->SetUINT32(MF_MT_DEFAULT_STRIDE, NUM_IMAGE_COLS * 4);
-	rgbType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-	rgbType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_FRAME_RATE, 30, 1);
-	auto bitrate = (uint32_t)(NUM_IMAGE_COLS * NUM_IMAGE_ROWS * 4 * 8 * 30);
-	rgbType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-	types[0] = rgbType.detach();
+            {
+                wil::com_ptr_nothrow<IMFMediaType> nv12Type;
+                RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
+                nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+                nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+                MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, res.width, res.height);
+                nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, res.width);
+                nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+                nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+                MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, fr.numerator, fr.denominator);
+                auto bitrate = (uint32_t)((res.width * res.height * 12 / 8) * (fr.numerator / (float)fr.denominator));
+                nv12Type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+                MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+                mediaTypes.push_back(nv12Type);
+            }
+        }
+    }
+    
+    std::vector<IMFMediaType*> rawMediaTypes;
+    rawMediaTypes.reserve(mediaTypes.size());
+    for(const auto& mt : mediaTypes)
+    {
+        rawMediaTypes.push_back(mt.get());
+    }
 
-	if (types.size() > 1)
-	{
-		wil::com_ptr_nothrow<IMFMediaType> nv12Type;
-		RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
-		nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-		nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-		nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-		nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-		MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-		nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT)(NUM_IMAGE_COLS));
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, 30, 1);
-		bitrate = (uint32_t)((NUM_IMAGE_COLS * NUM_IMAGE_ROWS * 12 / 8) * 30);
-		nv12Type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-		types[1] = nv12Type.detach();
-	}
-
-	RETURN_IF_FAILED_MSG(MFCreateStreamDescriptor(_index, (DWORD)types.size(), types.get(), &_descriptor), "MFCreateStreamDescriptor failed");
+	RETURN_IF_FAILED_MSG(MFCreateStreamDescriptor(_index, (DWORD)rawMediaTypes.size(), rawMediaTypes.data(), &_descriptor), "MFCreateStreamDescriptor failed");
 
 	wil::com_ptr_nothrow<IMFMediaTypeHandler> handler;
 	RETURN_IF_FAILED(_descriptor->GetMediaTypeHandler(&handler));
-	RETURN_IF_FAILED(handler->SetCurrentMediaType(types[0]));
+	RETURN_IF_FAILED(handler->SetCurrentMediaType(mediaTypes[0].get()));
 
 	return S_OK;
 }
@@ -451,6 +462,16 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 	if (type)
 	{
 		RETURN_IF_FAILED(type->GetGUID(MF_MT_SUBTYPE, &_format));
+        UINT32 width, height;
+        if (SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width, &height)))
+        {
+            if (width != _currentWidth || height != _currentHeight)
+            {
+                RETURN_IF_FAILED(_brokerClient.ReconfigureFormat(width, height));
+                _currentWidth = width;
+                _currentHeight = height;
+            }
+        }
 	}
 
 	if (!_brokerClient.HasD3DManager())
@@ -490,7 +511,9 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 {
 	RETURN_HR_IF_NULL(E_POINTER, manager);
 	RETURN_IF_FAILED(_allocator->SetDirectXManager(manager));
-	RETURN_IF_FAILED(_brokerClient.SetD3DManager(manager, NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	RETURN_IF_FAILED(_brokerClient.SetD3DManager(manager, _initialWidth, _initialHeight));
+    _currentWidth = _initialWidth;
+    _currentHeight = _initialHeight;
 	return S_OK;
 }
 
@@ -642,19 +665,11 @@ STDMETHODIMP_(NTSTATUS) MediaStream::KsEvent(PKSEVENT evt, ULONG length, LPVOID 
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
-//
-// COM DLL exports (merged from dllmain.cpp)
-//
-HMODULE _hModule;
-// 3cad447d-f283-4af4-a3b2-6f5363309f52
-GUID CLSID_VCam = { 0x3cad447d,0xf283,0x4af4,{0xa3,0xb2,0x6f,0x53,0x63,0x30,0x9f,0x52} };
-
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
 	switch (dwReason)
 	{
 	case DLL_PROCESS_ATTACH:
-		_hModule = hModule;
 		DisableThreadLibraryCalls(hModule);
 		break;
 	case DLL_PROCESS_DETACH:
@@ -700,7 +715,7 @@ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Outptr_ LPVOID
 	RETURN_HR_IF_NULL(E_POINTER, ppv);
 	*ppv = nullptr;
 
-	if (rclsid == CLSID_VCam)
+	if (IsEqualGUID(rclsid, CLSID_VCam))
 		return winrt::make_self<ClassFactory>()->QueryInterface(riid, ppv);
 
 	RETURN_HR(E_NOINTERFACE);
@@ -710,9 +725,12 @@ using registry_key = winrt::handle_type<registry_traits>;
 
 STDAPI DllRegisterServer()
 {
-	std::wstring exePath = wil::GetModuleFileNameW(_hModule).get();
+    HMODULE hModule = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)DllRegisterServer, &hModule);
+	
+    std::wstring exePath = wil::GetModuleFileNameW(hModule).get();
 	auto clsid = GUID_ToStringW(CLSID_VCam, false);
-	std::wstring path = L"Software\\Classes\\CLSID\\" + clsid + L"\\InprocServer32";
+	std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") + clsid + L"\\InprocServer32";
 
 	registry_key key;
 	RETURN_IF_WIN32_ERROR(RegWriteKey(HKEY_LOCAL_MACHINE, path.c_str(), key.put()));
@@ -724,7 +742,7 @@ STDAPI DllRegisterServer()
 STDAPI DllUnregisterServer()
 {
 	auto clsid = GUID_ToStringW(CLSID_VCam, false);
-	std::wstring path = L"Software\\Classes\\CLSID\\" + clsid;
+	std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") + clsid;
 	RETURN_IF_WIN32_ERROR(RegDeleteTree(HKEY_LOCAL_MACHINE, path.c_str()));
 	return S_OK;
 }

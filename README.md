@@ -15,9 +15,9 @@ DirectPort VirtuaCam is not a self-contained camera that generates its own video
 This is achieved through a producer-consumer model that operates directly on the GPU, avoiding costly memory transfers between the CPU and GPU.
 
 The data flow is as follows:
-
+```
 [Your App (Producer)] ---> [Shared D3D11 Texture & Fence] ---> [VirtuaCam DLL (Consumer)] ---> [Zoom, Teams, OBS, etc.]
-
+```
 This architecture is ideal for applications like game streaming, creative coding, real-time video filters, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed with minimal performance impact.
 
 
@@ -69,9 +69,9 @@ Select the desired configuration (e.g., Release, x64).
 ## How to Use
 
 Register the DLL: After building, you must register the COM server. Open a command prompt as an Administrator and run:
-
+```
 regsvr32 "C:\path\to\your\build\folder\DirectPortVirtuaCamDLL.dll"
-
+```
 Run the Producer: Start the sample producer application, example.exe. It will display a window with a simple rendered scene.
 
 Run the Controller: Start the tray controller, DirectPortVirtuaCamEXE.exe. A new icon will appear in your system tray.
@@ -110,7 +110,7 @@ After rendering, signal the shared fence with an incrementing frame value (ID3D1
 
 Update the frameValue in the shared manifest to notify consumers that a new frame is ready.
 
-Refer to example.cpp for a complete, working implementation.
+Refer to my Examples for complete, working implementations.
 
 ## License
 

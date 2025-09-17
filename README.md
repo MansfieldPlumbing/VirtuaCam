@@ -1,126 +1,99 @@
+
+***
+
 # VirtuaCam
-## A modern C++ virtual camera for Windows featuring a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
+A modern C++ virtual camera for Windows featuring a decoupled, high-performance producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications using shared resources.
 
-![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
-![alt text](https://img.shields.io/badge/Platform-Windows-blue.svg)
-![alt text](https://img.shields.io/badge/Language-C%2B%2B-orange.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)![Language: C++](https://img.shields.io/badge/Language-C%2B%2B-orange.svg)
 
-
-![ezgif-8b6e7f583e7eb3](https://github.com/user-attachments/assets/414a477f-d998-41e5-9465-4cbc158bbc05)
-
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/414a477f-d998-41e5-9465-4cbc158bbc05" alt="VirtuaCam in action with a producer application" />
+</p>
 
 ## Core Concept
 
-DirectPort VirtuaCam is not a self-contained camera that generates its own video. Instead, it acts as a high-performance transport system that exposes a video feed from another application as a standard webcam on your system.
+VirtuaCam is not a self-contained camera that generates its own video. Instead, it acts as a high-performance transport system that exposes a video feed from another application as a standard webcam on your system.
 
 This is achieved through a producer-consumer model that operates directly on the GPU, avoiding costly memory transfers between the CPU and GPU.
 
 The data flow is as follows:
 ```
-[Your App (Producer)] ---> [Shared D3D11 Texture & Fence] ---> [VirtuaCam DLL (Consumer)] ---> [Zoom, Teams, OBS, etc.]
+[Your App (Producer)] ---> [Shared D3D11/12 Texture & Fence] ---> [VirtuaCam (Consumer)] ---> [Zoom, Teams, OBS, etc.]
 ```
 This architecture is ideal for applications like game streaming, creative coding, real-time video filters, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed with minimal performance impact.
 
-
 ## Key Features
 
-High-Performance Zero-Copy Transfer: Video frames are shared between processes entirely on the GPU using DirectX 11 shared resources. This results in minimal latency and CPU overhead.
+*   **High-Performance Zero-Copy Transfer**: Video frames are shared between processes entirely on the GPU using DirectX shared resources, resulting in minimal latency and CPU overhead.
+*   **Decoupled Architecture**: The virtual camera (consumer) and your video-generating application (producer) are separate processes that can be started, stopped, and developed independently.
+*   **Dynamic Producer Discovery**: The virtual camera automatically scans for and connects to any running, compatible producer application. If the producer closes, the camera gracefully switches to a "No Signal" slate.
+*   **System Tray Controller**: A lightweight, unobtrusive tray icon manages the camera's lifecycle, providing a professional user experience.
+*   **Hardware-Accelerated Preview**: An on-demand preview window can be toggled from the tray menu to show the exact output of the camera, rendered with hardware acceleration.
+*   **Modern C++ Implementation**: Built with modern C++ and robust Windows libraries like WIL and C++/WinRT for stability and maintainability.
 
-Decoupled Architecture: The virtual camera (consumer) and your video-generating application (producer) are separate processes. They can be started, stopped, and developed independently.
-
-Dynamic Producer Discovery: The virtual camera automatically scans for and connects to any running, compatible producer application. If the producer closes, the camera gracefully switches to a "No Signal" slate.
-
-System Tray Controller: The camera's lifecycle is managed by a lightweight, unobtrusive tray icon, providing a professional user experience.
-
-Hardware-Accelerated Preview: An on-demand preview window can be toggled from the tray menu to show the exact output of the camera, rendered with hardware acceleration.
-
-Modern C++ Implementation: Built with modern C++ and robust Windows libraries like WIL and C++/WinRT for stability and maintainability.
-
-<img width="910" height="1005" alt="Screenshot 2025-09-16 083022" src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" />
-
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/f2e730f2-cbb6-4b13-9907-a3325037d40b" alt="VirtuaCam UI and Preview Window" width="800"/>
+</p>
 
 ## Project Components
 
 The solution is divided into three main parts:
 
-DirectPortVirtuaCamDLL (The Consumer/Camera)
-This is the core virtual camera source, implemented as a COM DLL. It registers itself as a Media Foundation device. Its FrameGenerator is responsible for finding a producer and copying the shared frames into the media pipeline.
+*   **VirtuaCamSource (The Consumer/Camera)**
+    This is the core virtual camera source, implemented as a COM DLL. It registers itself as a Media Foundation device. Its `FrameGenerator` is responsible for finding a producer and copying the shared frames into the media pipeline.
 
-DirectPortVirtuaCamEXE (The Controller)
-A lightweight Win32 application that runs in the system tray. It allows the user to enable or disable the virtual camera and toggle the preview window. It communicates with the DLL via a custom COM interface.
+*   **VirtuaCam (The Controller)**
+    A lightweight Win32 application that runs in the system tray. It allows the user to manage the virtual camera's sources and toggle the preview window.
+
+*   **DirectPortBroker (The Broker)**
+    A helper DLL that acts as an intermediary, managing connections and compositing video streams if multiple producers are active.
 
 ## Building the Project
 
-Prerequisites
+### Prerequisites
 
-Visual Studio 2022 (or later) with the "Desktop development with C++" workload.
+*   Visual Studio 2022 (or later) with the "Desktop development with C++" workload.
+*   Windows 10 SDK (latest version recommended).
+*   [vcpkg](https://vcpkg.io/) with the required libraries installed (e.g., WIL, C++/WinRT).
 
-Windows 10 SDK (latest version recommended, usually installed with Visual Studio).
+### Build Steps
 
-Required Libraries: The project uses modern C++ helper libraries like WIL and C++/WinRT. These should be acquirable via NuGet or included as submodules in a full repository setup.
-
-Build Steps
-
-Clone the repository.
-
-Run the provided Build script
-
-Select the desired configuration (e.g., Release, x64).
+1.  Clone the repository.
+2.  Run the provided `build.ps1` script to configure and build the solution.
+3.  The compiled binaries will be placed in the appropriate output directory.
 
 ## How to Use
 
-Register the DLL: After building, you must register the COM server. Open a command prompt as an Administrator and run:
-```
-regsvr32 "C:\path\to\your\build\folder\DirectPortVirtuaCamDLL.dll"
-```
-Run the Producer: Start the sample producer application, example.exe. It will display a window with a simple rendered scene.
+1.  **Register the DLL**: After building, you must register the COM server. Open a command prompt **as an Administrator** and run:
+    ```bash
+    regsvr32 "C:\path\to\your\build\folder\DirectPortVirtuaCam.dll"
+    ```
+2.  **Run a Producer**: Start a producer application. You can use any of the examples from the [DirectPort](https://github.com/MansfieldPlumbing/DirectPort) project.
+3.  **Run the Controller**: Start the tray controller, `VirtuaCam.exe`. A camera icon will appear in your system tray.
+4.  **Select in Application**: Open an application like the Windows Camera App, Zoom, or Discord. In the video settings, you should now be able to select **"VirtuaCam"** as your webcam.
 
-Run the Controller: Start the tray controller, DirectPortVirtuaCamEXE.exe. A new icon will appear in your system tray.
+---
 
-Enable the Camera: Right-click the tray icon and select "Enable Virtual Camera".
+## For Developers
 
-Select in Application: Open an application like the Windows Camera App, Zoom, or Discord. In the video settings, you should now be able to select "DirectPort VirtuaCam" as your webcam. The feed from the example.exe window will be displayed.
+### Creating Your Own Producer with DirectPort
 
-To disable the camera, right-click the tray icon and select "Disable Virtual Camera" or "Exit".
+To make your own application a source for VirtuaCam, you must implement the producer protocol. The easiest way to achieve this is by using our companion library, **[DirectPort](https://github.com/MansfieldPlumbing/DirectPort)**.
 
-## For Developers: Creating Your Own Producer
+DirectPort is a unified C++ and Python library that handles all the low-level DirectX and GPU synchronization details, allowing you to create a producer in just a few lines of code.
 
-To make your own application a source for DirectPort VirtuaCam, you must implement the producer protocol:
+### Creative Applications
 
-Create Shared D3D11 Resources:
-
-Create an ID3D11Texture2D with the D3D11_RESOURCE_MISC_SHARED_NTHANDLE flag.
-
-Create an ID3D11Fence with the D3D11_FENCE_FLAG_SHARED flag.
-
-Generate sharable HANDLEs for both resources.
-
-Create a Shared Manifest:
-
-Create a memory-mapped file named DirectPort_Producer_Manifest_[YourProcessID].
-
-Map a view of this file to a BroadcastManifest struct.
-
-Populate the manifest with the texture dimensions, format, adapter LUID, and the string names of your shared resource handles.
-
-Render Loop:
-
-In your render loop, draw your scene to the shared texture.
-
-After rendering, signal the shared fence with an incrementing frame value (ID3D11DeviceContext4::Signal).
-
-Update the frameValue in the shared manifest to notify consumers that a new frame is ready.
-
-Refer to my Examples for complete, working implementations.
+Looking for a ready-to-use creative application that already works with VirtuaCam? Check out **[FaceOn](https://github.com/MansfieldPlumbing/FaceOn)**, a real-time face-swapping and effects studio built on the DirectPort library. It's a perfect example of a powerful producer that can feed its output directly into VirtuaCam.
 
 ## License
 
-## This project is licensed under the MIT License.
+This project is licensed under the MIT License.
 
-## Copyright (c) [2025] [https://github.com/MansfieldPlumbing]
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+> Copyright (c) 2025 [MansfieldPlumbing](https://github.com/MansfieldPlumbing)
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

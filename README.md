@@ -6,7 +6,6 @@ VirtuaCam is a modern, high-performance virtual camera for Windows built with a 
 
 ![ezgif-81ee43ea485d78](https://github.com/user-attachments/assets/c99f8c50-8b2d-4b98-bb63-fc0e57082d44)
 
-
 ## Core Concept: A High-Performance Video Broker
 
 Unlike traditional virtual cameras that generate their own content, VirtuaCam acts as a high-performance transport system—a "broker"—that discovers and composites video feeds from other applications (producers). This is achieved directly on the GPU, avoiding costly memory transfers between the CPU and GPU, which results in minimal performance impact.
@@ -61,15 +60,38 @@ VirtuaCam's architecture relies on several key Windows technologies to achieve i
 
 Follow these steps to get the virtual camera up and running on your system.
 
-### 1. Build the Project
+### 1. Prerequisites & Dependencies
 
-First, build the entire solution using the provided `build.ps1` PowerShell script. This will compile all necessary DLLs and EXEs.
+Before building, ensure you have the following installed:
+
+*   **Visual Studio 2022** (or later) with the "Desktop development with C++" workload.
+*   **Windows 10 SDK** (latest version recommended, usually installed with Visual Studio).
+*   **Vcpkg** package manager.
+
+#### Vcpkg Dependencies
+
+This project requires two libraries that can be installed via vcpkg. Open your terminal and run the following commands:
+
+```sh
+vcpkg install wil
+vcpkg install cppwinrt
+```
+
+The build script is pre-configured to find vcpkg in its default installation path (`C:\vcpkg`). If you have it installed elsewhere, you can specify the path when running the build script:
+
+```powershell
+.\build.ps1 -VcpkgRoot "C:\path\to\your\vcpkg"
+```
+
+### 2. Build the Project
+
+With the prerequisites installed, you can now build the entire solution using the provided `build.ps1` PowerShell script. This will compile all necessary DLLs and EXEs.
 
 ```powershell
 .\build.ps1
 ```
 
-### 2. Register the Virtual Camera DLL (Administrator Required)
+### 3. Register the Virtual Camera DLL (Administrator Required)
 
 After a successful build, you must register the core COM server. This step requires Administrator privileges.
 
@@ -83,11 +105,11 @@ After a successful build, you must register the core COM server. This step requi
 
 You should see a confirmation message that the DLL was registered successfully. You can also use the build script for this: `.\build.ps1 -Register`.
 
-### 3. Run the VirtuaCam Controller
+### 4. Run the VirtuaCam Controller
 
 Double-click on `VirtuaCam.exe`. A new icon will appear in your system tray. This application runs the background broker process and provides the main user interface for controlling the camera.
 
-### 4. Select a Video Source
+### 5. Select a Video Source
 
 Right-click the VirtuaCam tray icon to open the context menu.
 
@@ -96,7 +118,7 @@ Right-click the VirtuaCam tray icon to open the context menu.
 *   **To use the auto-discovery grid:** Go to `Source` -> `Auto-Discovery Grid`. The camera will display a grid of all other active VirtuaCam-compatible producers running on your system.
 *   **To add Picture-in-Picture:** Use the `Picture-in-Picture` sub-menu to select a source for the PIP overlay. You can enable additional PIP windows in the `Settings` menu.
 
-### 5. Use in Your Target Application
+### 6. Use in Your Target Application
 
 Open an application like the **Windows Camera App**, **Zoom**, **Discord**, or **Microsoft Teams**. In the video settings, you should now be able to select **"VirtuaCam"** as your webcam. The feed you configured in the previous step will be displayed.
 

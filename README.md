@@ -1,7 +1,3 @@
-Apologies for the formatting error. Here is the corrected and properly formatted Markdown document for VirtuaCam.
-
-***
-
 # VirtuaCam
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)![Platform: Windows 11](https://img.shields.io/badge/Platform-Windows_11-blue.svg)![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)

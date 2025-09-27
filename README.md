@@ -4,6 +4,8 @@
 
 VirtuaCam is a modern, high-performance virtual camera for Windows built with a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications, games, or other video sources, exposing them as a standard webcam on your system for use in applications like Zoom, Microsoft Teams, OBS, Discord, and more.
 
+<img width="800" height="702" alt="image" src="https://github.com/user-attachments/assets/e2a6409e-0c5f-433a-b4ae-00c6b65cfbd2" />
+
 ## Core Concept: A High-Performance Video Broker
 
 Unlike traditional virtual cameras that generate their own content, VirtuaCam acts as a high-performance transport system—a "broker"—that discovers and composites video feeds from other applications (producers). This is achieved directly on the GPU, avoiding costly memory transfers between the CPU and GPU, which results in minimal performance impact.

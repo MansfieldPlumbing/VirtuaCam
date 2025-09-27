@@ -4,7 +4,7 @@
 #include <DirectXMath.h>
 #include "Tools.h"
 #include "App.h"
-#include "ShaderModule.h" 
+#include "ShaderModule.h" // <-- RE-INTRODUCED
 
 struct ProducerConnection
 {
@@ -34,7 +34,7 @@ class BrokerClient
     wil::com_ptr_nothrow<ID3D11VertexShader> _blitVS;
     wil::com_ptr_nothrow<ID3D11PixelShader> _blitPS;
     wil::com_ptr_nothrow<ID3D11SamplerState> _blitSampler;
-    ShaderModule _offModeShader;
+    ShaderModule _offModeShader; // <-- RE-INTRODUCED
 
 private:
     HRESULT FindAndConnectToBroker();

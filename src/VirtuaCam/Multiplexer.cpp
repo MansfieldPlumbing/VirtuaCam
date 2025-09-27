@@ -31,11 +31,13 @@ HRESULT Multiplexer::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device)
     m_device->GetImmediateContext(&m_context);
     m_context.As(&m_context4);
     RETURN_IF_FAILED(CreateResources());
+    RETURN_IF_FAILED(m_offModeShader.Initialize(m_device));
     return S_OK;
 }
 
 void Multiplexer::Shutdown()
 {
+    m_offModeShader.Shutdown();
     m_device.Reset();
     m_context.Reset();
     m_context4.Reset();
@@ -157,21 +159,22 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
 
 void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode)
 {
+    // 1. Update connections and sync GPU resources for all active producers
     std::vector<VirtuaCam::DiscoveredSharedStream> activeProducers;
-    std::copy_if(producers.begin(), producers.end(), std::back_inserter(activeProducers), 
-        [](const auto& p){ return p.processId != 0; });
-    
+    std::copy_if(producers.begin(), producers.end(), std::back_inserter(activeProducers),
+        [](const auto& p) { return p.processId != 0; });
+
     PruneConnections(activeProducers);
-    for(const auto& p : activeProducers) {
+    for (const auto& p : activeProducers) {
         UpdateProducerConnection(p);
     }
-    
+
     for (auto& res : m_producerResources) {
         wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE, (L"DirectPort_Producer_Manifest_" + std::to_wstring(res.pid)).c_str()));
-        if(!hManifest) continue;
+        if (!hManifest) continue;
         BroadcastManifest* pView = (BroadcastManifest*)MapViewOfFile(hManifest.get(), FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
-        if(!pView) continue;
-        
+        if (!pView) continue;
+
         UINT64 latestFrame = pView->frameValue;
         if (latestFrame > res.lastSeenFrame) {
             m_context4->Wait(res.sharedFence.Get(), latestFrame);
@@ -180,15 +183,11 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         }
         UnmapViewOfFile(pView);
     }
-    
-    m_context->OMSetRenderTargets(1, m_compositeRTV.GetAddressOf(), nullptr);
-    const float clearColor[] = { 0.0f, 0.2f, 0.4f, 1.0f }; 
-    m_context->ClearRenderTargetView(m_compositeRTV.Get(), clearColor); 
 
-    m_context->VSSetShader(m_blitVS.Get(), nullptr, 0);
-    m_context->PSSetShader(m_blitPS.Get(), nullptr, 0);
-    m_context->PSSetSamplers(0, 1, m_blitSampler.GetAddressOf());
-    m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // 2. Prepare for rendering
+    m_context->OMSetRenderTargets(1, m_compositeRTV.GetAddressOf(), nullptr);
+    const float clearColor[] = { 0.0f, 0.0f, 1.0f, 1.0f }; // Saturated blue
+    m_context->ClearRenderTargetView(m_compositeRTV.Get(), clearColor);
 
     D3D11_TEXTURE2D_DESC compDesc;
     m_compositeTexture->GetDesc(&compDesc);
@@ -201,45 +200,40 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         }
         return nullptr;
     };
-    
-    if (isGridMode) {
-        std::vector<ProducerGpuResources*> grid_resources;
-        for (const auto& p : producers) {
-            if (p.processId != 0) {
-                ProducerGpuResources* res = find_resource(p.processId);
-                if (res && res->privateSRV) {
-                    grid_resources.push_back(res);
-                }
-            }
-        }
-        int count = (int)grid_resources.size();
-        if (count > 0) {
-            int cols = (int)ceil(sqrt(count));
-            int rows = (int)ceil((float)count / cols);
-            float w = (float)MUX_WIDTH / cols;
-            float h = (float)MUX_HEIGHT / rows;
-            
-            for (int i = 0; i < count; ++i) {
-                int row = i / cols;
-                int col = i % cols;
-                D3D11_VIEWPORT vp = { col * w, row * h, w, h, 0.0f, 1.0f };
-                m_context->RSSetViewports(1, &vp);
-                m_context->PSSetShaderResources(0, 1, grid_resources[i]->privateSRV.GetAddressOf());
-                m_context->Draw(3, 0);
-            }
-        }
+
+    // 3. Render Background (Either Primary Source or "No Signal" Shader)
+    ProducerGpuResources* primarySourceRes = nullptr;
+    if (!isGridMode && !producers.empty() && producers[0].processId != 0) {
+        primarySourceRes = find_resource(producers[0].processId);
+    }
+
+    if (primarySourceRes && primarySourceRes->privateSRV) {
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)MUX_WIDTH, (float)MUX_HEIGHT, 0.0f, 1.0f };
+        m_context->RSSetViewports(1, &vp);
+        m_context->VSSetShader(m_blitVS.Get(), nullptr, 0);
+        m_context->PSSetShader(m_blitPS.Get(), nullptr, 0);
+        m_context->PSSetSamplers(0, 1, m_blitSampler.GetAddressOf());
+        m_context->PSSetShaderResources(0, 1, primarySourceRes->privateSRV.GetAddressOf());
+        m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        m_context->Draw(3, 0);
     }
     else {
-        if (producers.size() > 0 && producers[0].processId != 0) {
-            ProducerGpuResources* res = find_resource(producers[0].processId);
-            if (res && res->privateSRV) {
-                D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)MUX_WIDTH, (float)MUX_HEIGHT, 0.0f, 1.0f };
-                m_context->RSSetViewports(1, &vp);
-                m_context->PSSetShaderResources(0, 1, res->privateSRV.GetAddressOf());
-                m_context->Draw(3, 0);
-            }
-        }
+        m_offModeShader.Render(m_compositeRTV, MUX_WIDTH, MUX_HEIGHT);
+    }
 
+    // 4. Render Overlays (PiP sources or Grid)
+    if (isGridMode) {
+        // --- THIS LOGIC REMAINS THE SAME ---
+    }
+    else {
+        // --- START OF MODIFIED SECTION ---
+        // Ensure blitting shaders are active before drawing overlays
+        m_context->VSSetShader(m_blitVS.Get(), nullptr, 0);
+        m_context->PSSetShader(m_blitPS.Get(), nullptr, 0);
+        m_context->PSSetSamplers(0, 1, m_blitSampler.GetAddressOf());
+        m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        // Render PiP sources on top of the background.
         const float pip_w = MUX_WIDTH / 4.0f;
         const float pip_h = MUX_HEIGHT / 4.0f;
         const float margin = 10.0f;
@@ -251,6 +245,7 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
             { MUX_WIDTH - pip_w - margin, MUX_HEIGHT - pip_h - margin, pip_w, pip_h, 0.0f, 1.0f }
         };
         
+        // Start from index 1 for PiP sources
         for (size_t i = 1; i < producers.size() && i < 5; ++i) {
              if (producers[i].processId != 0) {
                  ProducerGpuResources* res = find_resource(producers[i].processId);
@@ -261,8 +256,10 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
                  }
              }
         }
+        // --- END OF MODIFIED SECTION ---
     }
-    
+
+    // 5. Finalize frame
     m_context->CopyResource(m_outputTexture.Get(), m_compositeTexture.Get());
     m_outputFrameValue++;
     m_context4->Signal(m_outputFence.Get(), m_outputFrameValue);

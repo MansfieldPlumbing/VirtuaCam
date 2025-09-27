@@ -1,6 +1,7 @@
 #pragma once
 #include "Tools.h"
 #include "Discovery.h"
+#include "ShaderModule.h" // <-- ADDED
 #include <wrl/client.h>
 #include <d3d11_4.h>
 #include <vector>
@@ -43,6 +44,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11VertexShader> m_blitVS;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_blitPS;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_blitSampler;
+
+    ShaderModule m_offModeShader; // <-- ADDED
 
     std::vector<ProducerGpuResources> m_producerResources;
 

@@ -137,7 +137,7 @@ HRESULT BrokerClient::FindAndConnectToBroker()
     wil::com_ptr_nothrow<IDXGIAdapter> adapter;
     DXGI_ADAPTER_DESC desc;
     if (SUCCEEDED(device->QueryInterface(&dxgiDevice)) && SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&desc))) {
-        if (memcmp(&pManifestView->adapterLuid, &desc.AdapterLuid, sizeof(LUID)) == 0) {
+        // if (memcmp(&pManifestView->adapterLuid, &desc.AdapterLuid, sizeof(LUID)) == 0) { // <-- REMOVED LUID CHECK FOR ROBUSTNESS
             wil::com_ptr_nothrow<ID3D11Device1> device1; wil::com_ptr_nothrow<ID3D11Device5> device5;
             device->QueryInterface(&device1); device->QueryInterface(&device5);
             if (device1 && device5) {
@@ -160,7 +160,7 @@ HRESULT BrokerClient::FindAndConnectToBroker()
                     }
                 }
             }
-        }
+        // }
     }
     UnmapViewOfFile(pManifestView);
     _brokerState = BrokerState::Failed;

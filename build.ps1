@@ -4,7 +4,7 @@
 
 # --- PARAMETERS ---
 param(
-    [string]$VcpkgRoot = "A:\vcpkg",
+    [string]$VcpkgRoot = "c:\vcpkg",
     [string]$BuildConfig = "Release",
     [switch]$Clean,
     [switch]$Register,

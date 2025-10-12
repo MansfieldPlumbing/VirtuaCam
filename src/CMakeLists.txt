@@ -27,7 +27,8 @@ target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_VCPKG_LIBS} ${VCAM_MF_LIBS} 
 target_compile_definitions(VirtuaCamCommon PRIVATE UNICODE _UNICODE)
 
 add_library(DirectPortClient SHARED
-    VirtuaCam/VirtualCamera.cpp
+    # --- FIX 1: Replaced 'VirtualCamera.cpp' with the correct 'MFClient.cpp' ---
+    VirtuaCam/MFClient.cpp      # <- NEW
     VirtuaCam/BrokerClient.cpp
     VirtuaCam/pch.cpp
     VirtuaCam/pch.h
@@ -50,8 +51,9 @@ set_target_properties(DirectPortBroker PROPERTIES OUTPUT_NAME "DirectPortBroker"
 target_link_libraries(DirectPortBroker PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortBroker PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
 
-add_library(DirectPortMFCamera SHARED 
-    VirtuaCam/CameraModule.cpp
+add_library(DirectPortMFCamera SHARED
+    # --- FIX 2: Replaced 'CameraModule.cpp' with the correct 'MFCamera.cpp' ---
+    VirtuaCam/MFCamera.cpp      # <- NEW
     VirtuaCam/pch.cpp
 )
 set_target_properties(DirectPortMFCamera PROPERTIES OUTPUT_NAME "DirectPortMFCamera")
@@ -59,16 +61,17 @@ target_link_libraries(DirectPortMFCamera PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortMFCamera PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
 target_precompile_headers(DirectPortMFCamera PRIVATE VirtuaCam/pch.h)
 
-add_library(DirectPortMFGraphicsCapture SHARED 
-    VirtuaCam/GraphicsCapture.cpp
-    VirtuaCam/pch.cpp 
+add_library(DirectPortMFGraphicsCapture SHARED
+    # --- FIX 3: Replaced 'GraphicsCapture.cpp' with the correct 'MFGraphicsCapture.cpp' ---
+    VirtuaCam/MFGraphicsCapture.cpp # <- NEW
+    VirtuaCam/pch.cpp
 )
 set_target_properties(DirectPortMFGraphicsCapture PROPERTIES OUTPUT_NAME "DirectPortMFGraphicsCapture")
 target_link_libraries(DirectPortMFGraphicsCapture PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortMFGraphicsCapture PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
 target_precompile_headers(DirectPortMFGraphicsCapture PRIVATE VirtuaCam/pch.h)
 
-add_library(DirectPortConsumer SHARED 
+add_library(DirectPortConsumer SHARED
     VirtuaCam/Consumer.cpp
     VirtuaCam/pch.cpp
 )

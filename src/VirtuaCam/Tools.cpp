@@ -1,7 +1,24 @@
+// =============================================================================
+// Tools.cpp  --  Shared utilities
+// =============================================================================
+// Miscellaneous helpers used across all VirtuaCam modules:
+//   - Narrow/wide string conversion
+//   - GUID and PROPVARIANT human-readable formatting (for debug traces)
+//   - Window centering (multi-monitor aware)
+//   - HSL->RGB colour conversion (used by the UI)
+//   - Software RGB32 -> NV12 colour-space conversion (BT.601, limited range)
+//   - Registry read/write wrappers
+//   - Cross-process D3D11 shared-handle lookup via D3D12
+// =============================================================================
+
 #include "pch.h"
 #include "Tools.h"
 #include "Enumerator.h"
 #include <d3d12.h>
+
+// ---------------------------------------------------------------------------
+// String conversion helpers
+// ---------------------------------------------------------------------------
 
 std::string to_string(const std::wstring& ws)
 {
@@ -40,6 +57,12 @@ std::wstring to_wstring(const std::string& s)
 
     return ws;
 }
+
+// ---------------------------------------------------------------------------
+// GUID resolution helpers
+// ---------------------------------------------------------------------------
+// IFIID resolves interface IIDs using __uuidof(T); IFGUID resolves named
+// GUID constants defined in the Windows SDK or in Guids.h.
 
 #define IFIID(x) if (guid == __uuidof(##x)) return L#x;
 #define IFGUID(x) if (guid == ##x) return L#x;
@@ -132,6 +155,7 @@ const std::wstring GUID_ToStringW(const GUID& guid, bool resolve)
         IFIID(IMFAttributes);
     }
 
+    // Fall back to the raw "{xxxxxxxx-xxxx-...}" representation.
     wchar_t name[64];
     std::ignore = StringFromGUID2(guid, name, _countof(name));
     return name;
@@ -151,6 +175,10 @@ const std::wstring PROPVARIANT_ToString(const PROPVARIANT& pv)
     return type;
 }
 
+// ---------------------------------------------------------------------------
+// Window centering (multi-monitor aware)
+// ---------------------------------------------------------------------------
+
 void CenterWindow(HWND hwnd, bool useCursorPos)
 {
     if (!IsWindow(hwnd))
@@ -163,6 +191,7 @@ void CenterWindow(HWND hwnd, bool useCursorPos)
 
     if (useCursorPos)
     {
+        // Centre on whichever monitor the mouse cursor is on.
         POINT pt{};
         if (GetCursorPos(&pt))
         {
@@ -177,32 +206,29 @@ void CenterWindow(HWND hwnd, bool useCursorPos)
         }
     }
 
+    // Fallback: centre on the primary monitor.
     SetWindowPos(hwnd, NULL, (GetSystemMetrics(SM_CXSCREEN) - width) / 2, (GetSystemMetrics(SM_CYSCREEN) - height) / 2, 0, 0, SWP_NOREDRAW | SWP_NOSIZE | SWP_NOZORDER);
 }
+
+// ---------------------------------------------------------------------------
+// HSL -> RGB colour conversion
+// ---------------------------------------------------------------------------
+// Used by the UI to generate colours from hue/saturation/lightness values.
+// Algorithm: standard two-step HSL decomposition into RGB primaries.
 
 inline float HUE2RGB(const float p, const float q, float t)
 {
     if (t < 0)
-    {
         t += 1;
-    }
-
     if (t > 1)
-    {
         t -= 1;
-    }
-
     if (t < 1 / 6.0f)
         return p + (q - p) * 6 * t;
-
     if (t < 1 / 2.0f)
         return q;
-
     if (t < 2 / 3.0f)
         return p + (q - p) * (2 / 3.0f - t) * 6;
-
     return p;
-
 }
 
 D2D1_COLOR_F HSL2RGB(const float h, const float s, const float l)
@@ -212,6 +238,7 @@ D2D1_COLOR_F HSL2RGB(const float h, const float s, const float l)
 
     if (!s)
     {
+        // Achromatic (grey): all channels equal lightness.
         result.r = l;
         result.g = l;
         result.b = l;
@@ -225,8 +252,11 @@ D2D1_COLOR_F HSL2RGB(const float h, const float s, const float l)
         result.b = HUE2RGB(p, q, h - 1 / 3.0f);
     }
     return result;
-
 }
+
+// ---------------------------------------------------------------------------
+// Process name helper
+// ---------------------------------------------------------------------------
 
 const std::wstring GetProcessName(DWORD pid)
 {
@@ -246,6 +276,10 @@ const std::wstring GetProcessName(DWORD pid)
     return L"";
 }
 
+// ---------------------------------------------------------------------------
+// Registry helpers
+// ---------------------------------------------------------------------------
+
 const LSTATUS RegWriteKey(HKEY key, PCWSTR path, HKEY* outKey)
 {
     *outKey = nullptr;
@@ -262,6 +296,23 @@ const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value)
     return RegSetValueEx(key, name, 0, REG_DWORD, reinterpret_cast<BYTE const*>(&value), sizeof(value));
 }
 
+// ---------------------------------------------------------------------------
+// Software YUV conversion  (BT.601, limited / "studio" range)
+// ---------------------------------------------------------------------------
+// These functions convert RGB pixels to the YCbCr colour space used by NV12.
+//
+// The integer coefficients are the standard BT.601 limited-range approximation:
+//
+//   Y  = ( 66*R + 129*G +  25*B + 128) >> 8  + 16
+//   Cb = (-38*R -  74*G + 112*B + 128) >> 8  + 128
+//   Cr = (112*R -  94*G -  18*B + 128) >> 8  + 128
+//
+// The +128 before the shift is a rounding bias (equivalent to 0.5 after the
+// divide).  The +16 and +128 offsets are the limited-range foot levels for Y
+// and chroma respectively (Y: [16,235], Cb/Cr: [16,240]).
+//
+// Reference: ITU-R BT.601-7, Section 2.5.3
+
 static inline void RGB24ToYUY2(int r, int g, int b, BYTE* y, BYTE* u, BYTE* v)
 {
     *y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
@@ -269,19 +320,37 @@ static inline void RGB24ToYUY2(int r, int g, int b, BYTE* y, BYTE* u, BYTE* v)
     *v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
 }
 
+// Y-only variant (used for pixels that share Cb/Cr with a neighbour due to
+// 4:2:0 chroma subsampling).
 static inline void RGB24ToY(int r, int g, int b, BYTE* y)
 {
     *y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
 }
 
+// Converts two horizontally adjacent pixels from two vertically adjacent rows
+// (a 2x2 block) into NV12 format.  NV12 has a full-resolution Y plane followed
+// by a half-resolution interleaved UV plane (4:2:0 chroma subsampling).
+// Input:  rgb1 = top row (two BGRA pixels = 8 bytes)
+//         rgb2 = bottom row (two BGRA pixels = 8 bytes)
+//         Note: BGRA byte order, so channel indices are [0]=B, [1]=G, [2]=R, [3]=A.
+// Output: y1/y2 = luma for top/bottom row pixels (2 bytes each)
+//         uv    = interleaved Cb,Cr for the 2x2 block (2 bytes)
 static inline void RGB32ToNV12(BYTE rgb1[8], BYTE rgb2[8], BYTE* y1, BYTE* y2, BYTE* uv)
 {
+    // Top-left pixel: compute Y + U/V (U/V represent the whole 2x2 block)
     RGB24ToYUY2(rgb1[2], rgb1[1], rgb1[0], y1, uv, uv + 1);
+    // Top-right pixel: Y only (shares U/V with top-left)
     RGB24ToY(rgb1[6], rgb1[5], rgb1[4], y1 + 1);
+    // Bottom-left pixel: Y only (shares U/V — chroma overwritten, but values are similar)
     RGB24ToYUY2(rgb2[2], rgb2[1], rgb2[0], y2, uv, uv + 1);
+    // Bottom-right pixel: Y only
     RGB24ToY(rgb2[6], rgb2[5], rgb2[4], y2 + 1);
 };
 
+// Full-frame RGB32 -> NV12 conversion.
+// Processes the image two rows at a time to correctly handle 4:2:0 chroma
+// subsampling (each U/V sample covers a 2x2 pixel block).
+// Output layout: Y plane [width x height bytes] then UV plane [width x height/2 bytes].
 HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG ouputSize, LONG outputStride)
 {
     RETURN_HR_IF_NULL(E_INVALIDARG, input);
@@ -291,24 +360,31 @@ HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
 
     for (DWORD h = 0; h < height - 1; h += 2)
     {
-        auto rgb1 = h * inputStride + input;
+        auto rgb1     = h * inputStride + input;
         auto rgb2pRGB2 = (h + 1) * inputStride + input;
-        auto y1 = h * outputStride + output;
-        auto y2 = (h + 1) * outputStride + output;
-        auto uv = (h / 2 + height) * outputStride + output;
+        auto y1       = h * outputStride + output;
+        auto y2       = (h + 1) * outputStride + output;
+        // UV plane starts immediately after the Y plane at row offset 'height'.
+        auto uv       = (h / 2 + height) * outputStride + output;
         for (DWORD w = 0; w < width; w += 2)
         {
             RGB32ToNV12(rgb1, rgb2pRGB2, y1, y2, uv);
-            rgb1 += 8;
+            rgb1     += 8;
             rgb2pRGB2 += 8;
-            y1 += 2;
-            y2 += 2;
-            uv += 2;
+            y1  += 2;
+            y2  += 2;
+            uv  += 2;
         }
     }
     return S_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Cross-process D3D11 shared-handle lookup
+// ---------------------------------------------------------------------------
+// D3D11 does not expose OpenSharedHandleByName; D3D12 does.
+// We create a temporary D3D12 device solely to call OpenSharedHandleByName,
+// then return the NT handle so the caller can open it with D3D11.
 HANDLE GetHandleFromName(const WCHAR* name)
 {
     wil::com_ptr_nothrow<ID3D12Device> d3d12Device;
@@ -321,11 +397,20 @@ HANDLE GetHandleFromName(const WCHAR* name)
     return handle;
 }
 
+// ---------------------------------------------------------------------------
+// Debug tracing stub
+// ---------------------------------------------------------------------------
+// Intentionally a no-op in both Debug and Release; uncomment the body and
+// add TraceMFAttributes calls where needed during debugging.
 void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix)
 {
 	UNREFERENCED_PARAMETER(unknown);
 	UNREFERENCED_PARAMETER(prefix);
 }
+
+// ---------------------------------------------------------------------------
+// KSIDENTIFIER (KS property) to string
+// ---------------------------------------------------------------------------
 
 std::wstring PKSIDENTIFIER_ToString(PKSIDENTIFIER id, ULONG length)
 {

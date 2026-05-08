@@ -1,3 +1,25 @@
+// =============================================================================
+// MFStream.cpp  --  IMFMediaStream2 implementation
+// =============================================================================
+// MFStream is the single video stream owned by MFSource.  It implements the
+// sample-request / event-notification contract that Media Foundation uses to
+// pull frames from the virtual camera:
+//
+//   1. MF calls RequestSample() when it needs a frame.
+//   2. MFStream allocates a D3D11 sample from the MF-provided allocator,
+//      stamps it with the current time and a fixed 33.3 ms duration (30 fps),
+//      calls BrokerClient::Generate() to fill it, then fires MEMediaSample.
+//
+// Media types advertised
+// ----------------------
+//   [0] RGB32  — 1280×720 @ 30 fps, stride = width×4
+//   [1] NV12   — 1280×720 @ 30 fps, stride = width   (Y plane only)
+//
+// NV12 bit-rate is calculated as: width × height × 12/8 bits/pixel × 30 fps.
+// NV12 stride covers only the Y plane; the interleaved UV plane shares the
+// same stride but is at an offset of height×stride bytes into the buffer.
+// =============================================================================
+
 #include "pch.h"
 #include "Undocumented.h"
 #include "Tools.h"
@@ -6,6 +28,9 @@
 #include "MFStream.h"
 #include "MFSource.h"
 
+// Output resolution — must match the dimensions used by the broker (1280×720
+// is the stream's declared capability; the broker composites at 1920×1080 and
+// the blit shader scales down to fit).
 #define NUM_IMAGE_COLS 1280
 #define NUM_IMAGE_ROWS 720
 
@@ -197,8 +222,11 @@ STDMETHODIMP MFStream::RequestSample(IUnknown* pToken)
 	wil::com_ptr_nothrow<IMFSample> sample;
 	RETURN_IF_FAILED(_allocator->AllocateSample(&sample));
 	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
+	// 333333 × 100 ns = 33.3333 ms = 1/30 second per frame.
 	RETURN_IF_FAILED(sample->SetSampleDuration(333333));
 
+	// BrokerClient fills the sample's D3D11 texture from the broker output
+	// (or renders the off-mode placeholder if the broker isn't running).
 	wil::com_ptr_nothrow<IMFSample> outSample;
 	RETURN_IF_FAILED(_generator.Generate(sample.get(), _format, &outSample));
 

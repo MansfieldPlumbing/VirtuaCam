@@ -1,3 +1,24 @@
+// =============================================================================
+// WASAPI.cpp  --  Audio capture via Windows Audio Session API
+// =============================================================================
+// WASAPICapture wraps WASAPI shared-mode audio capture for two device types:
+//
+//   Render devices (loopback capture)
+//     Capture whatever is playing through a speaker/headphone output.
+//     Uses AUDCLNT_STREAMFLAGS_LOOPBACK — no microphone permission needed.
+//
+//   Capture devices (microphone capture)
+//     Standard microphone input via IAudioCaptureClient.
+//
+// The capture runs on a dedicated thread elevated to the "Audio" MMCSS task
+// to minimise scheduling jitter.  The thread polls every 100 ms using
+// WaitForSingleObject on a shutdown event rather than sleeping in a loop.
+//
+// NOTE: The captured audio data is currently not forwarded anywhere.
+// The TODO in CaptureThreadImpl() marks where audio processing/mixing would
+// be plugged in (e.g. encoding and injecting into the virtual camera stream).
+// =============================================================================
+
 #include "pch.h"
 #include "WASAPI.h"
 #include "App.h"
@@ -109,6 +130,8 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
 
     wil::unique_cotaskmem_ptr<WAVEFORMATEX> format(pwfx);
 
+    // AUDCLNT_STREAMFLAGS_EVENTCALLBACK lets the audio engine wake the thread
+    // precisely when data is available, instead of requiring a polling loop.
     HANDLE hAudioEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     RETURN_HR_IF_NULL(E_FAIL, hAudioEvent);
     m_audioClient->SetEventHandle(hAudioEvent);
@@ -156,6 +179,9 @@ DWORD WINAPI WASAPICapture::CaptureThread(LPVOID context) {
 // Main loop for the capture thread.
 void WASAPICapture::CaptureThreadImpl() {
     DWORD taskIndex = 0;
+    // AvSetMmThreadCharacteristics raises this thread's priority via MMCSS
+    // ("Multimedia Class Scheduler Service") so it preempts normal-priority
+    // threads and gets tighter scheduling guarantees from the kernel.
     HANDLE hTask = AvSetMmThreadCharacteristics(L"Audio", &taskIndex);
 
     while (WaitForSingleObject(m_hShutdownEvent, 100) == WAIT_TIMEOUT) {

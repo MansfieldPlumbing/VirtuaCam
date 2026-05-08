@@ -1,3 +1,28 @@
+// =============================================================================
+// MFGraphicsCapture.cpp  --  Window / desktop capture producer
+// =============================================================================
+// This producer DLL is loaded by VirtuaCamProcess.exe (--type capture).
+// It captures a target window (or the desktop) using the Windows.Graphics.Capture
+// API (introduced in Windows 10 1803) and forwards frames to the broker.
+//
+// Argument: --hwnd <handle-as-uint64>   (the window to capture)
+//
+// Windows.Graphics.Capture vs. Desktop Duplication
+// -------------------------------------------------
+// The older DXGI Desktop Duplication API requires capturing the whole desktop;
+// Windows.Graphics.Capture can target an individual window, handles DWM
+// composition correctly (captures what you see on screen, including rounded
+// corners), and works without administrator privileges.
+//
+// IDirect3DDxgiInterfaceAccess
+// ----------------------------
+// The WinRT Direct3D11CaptureFrame::Surface() returns an IDirect3DSurface (a
+// WinRT type).  To get the underlying ID3D11Texture2D we must QI through
+// IDirect3DDxgiInterfaceAccess::GetInterface().  This interface is not in the
+// public SDK headers for older Windows 10 SDKs, so it is declared inline here
+// with a guard to avoid double-definition if a newer SDK ships it.
+// =============================================================================
+
 #include "pch.h"
 #include "MFGraphicsCapture.h"
 #include "Tools.h"
@@ -145,9 +170,13 @@ extern "C" {
 
         try
         {
+            // TryGetNextFrame() is non-blocking — returns null if no new frame
+            // is ready yet.  The caller (Process.cpp) re-polls every ~1 ms.
             winrt::Direct3D11CaptureFrame frame = g_framePool.TryGetNextFrame();
             if (frame)
             {
+                // Unwrap the WinRT IDirect3DSurface to the underlying D3D11 texture
+                // via IDirect3DDxgiInterfaceAccess (see file header for why this is needed).
                 auto surface = frame.Surface();
                 ComPtr<IDirect3DDxgiInterfaceAccess> surfaceAccess;
                 if (SUCCEEDED(surface.as<IUnknown>()->QueryInterface(IID_PPV_ARGS(&surfaceAccess))))

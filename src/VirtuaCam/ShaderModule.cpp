@@ -1,12 +1,29 @@
+// =============================================================================
+// ShaderModule.cpp  --  "Off mode" animated CRT shader
+// =============================================================================
+// Renders a retro blue CRT placeholder whenever no producer is connected.
+// The shader (defined in ShaderModule.h) animates scanlines, chromatic
+// aberration, and a vignette over a "PC" text graphic.
+//
+// The constant buffer passes the current time (seconds since Initialize()) and
+// the output resolution to the pixel shader so it can animate and scale
+// correctly regardless of viewport size.
+//
+// The sampler state is not currently used (the shader generates everything
+// procedurally from UV coordinates), but was kept in the source as a reference
+// in case a future version samples a texture.
+// =============================================================================
+
 #include "pch.h"
 #include "ShaderModule.h"
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
 
-// New: C++ struct to match the HLSL constant buffer layout
+// Must match the cbuffer layout in the pixel shader (ShaderModule.h).
+// HLSL packs floats in 16-byte aligned rows; 'pad' keeps the struct 16-byte aligned.
 struct ShaderConstants {
-    float bar_rect[4];      // unused
+    float bar_rect[4];  // reserved / unused
     float resolution[2];
     float time;
     float pad;
@@ -34,7 +51,7 @@ HRESULT ShaderModule::Initialize(wil::com_ptr_nothrow<ID3D11Device> device) {
     hr = m_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_ps);
     if (FAILED(hr)) return hr;
 
-    // New: Create the constant buffer
+    // Constant buffer: DYNAMIC / WRITE_DISCARD so we can update time each frame.
     D3D11_BUFFER_DESC cbd = {};
     cbd.Usage = D3D11_USAGE_DYNAMIC;
     cbd.ByteWidth = sizeof(ShaderConstants);
@@ -45,7 +62,7 @@ HRESULT ShaderModule::Initialize(wil::com_ptr_nothrow<ID3D11Device> device) {
     hr = m_device->CreateBuffer(&cbd, nullptr, &m_constantBuffer);
     if (FAILED(hr)) return hr;
 
-    // New: Start the timer for animation
+    // Record wall-clock start time for the animation 'time' uniform.
     m_startTime = std::chrono::steady_clock::now();
 
     // The sampler state is not used by the new pixel shader, so it's commented out but kept for reference.
@@ -75,7 +92,7 @@ void ShaderModule::Shutdown() {
 void ShaderModule::Render(wil::com_ptr_nothrow<ID3D11RenderTargetView> rtv, UINT width, UINT height) {
     if (!m_context || !m_vs || !m_ps || !rtv || !m_constantBuffer) return;
 
-    // New: Update the constant buffer with current time and resolution
+    // Update time and resolution uniforms each frame via a mapped write.
     D3D11_MAPPED_SUBRESOURCE mappedResource;
     HRESULT hr = m_context->Map(m_constantBuffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
     if (SUCCEEDED(hr))
@@ -98,7 +115,7 @@ void ShaderModule::Render(wil::com_ptr_nothrow<ID3D11RenderTargetView> rtv, UINT
     m_context->VSSetShader(m_vs.get(), nullptr, 0);
     m_context->PSSetShader(m_ps.get(), nullptr, 0);
 
-    // New: Bind the constant buffer to the pixel shader pipeline at slot 0
+    // Bind the constant buffer to the pixel shader at register b0.
     m_context->PSSetConstantBuffers(0, 1, m_constantBuffer.addressof());
     
     m_context->IASetInputLayout(nullptr);

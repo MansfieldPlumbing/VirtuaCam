@@ -1,3 +1,27 @@
+// =============================================================================
+// MFSource.cpp  --  IMFMediaSource2 implementation
+// =============================================================================
+// MFSource is the virtual camera's media source — the object that Windows'
+// Media Foundation Frame Server creates (via MFActivate) and queries for video
+// frames.  It implements:
+//   IMFMediaSource2 / IMFMediaSourceEx / IMFMediaSource  — core source contract
+//   IMFGetService        — service provider (e.g. D3D manager)
+//   IKsControl           — kernel-streaming property interface (stubs)
+//   IMFSampleAllocatorControl — lets MF provide a D3D-aware sample allocator
+//
+// MFSource owns one MFStream which does the actual frame generation via
+// BrokerClient (connecting to DirectPortBroker and blitting frames).
+//
+// Sensor profiles
+// ---------------
+// Two profiles are advertised so apps that care about frame-rate caps
+// (e.g. Windows camera app) can pick the appropriate one:
+//   Legacy         — filters to ≤30 fps
+//   HighFrameRate  — filters to ≥60 fps
+// The profile filter syntax is a Media Foundation SDDL-like expression:
+//   "((RES==;FRT<=30,1;SUT==))" means "any resolution, frame rate ≤30/1, any subtype".
+// =============================================================================
+
 #include "pch.h"
 #include "Undocumented.h"
 #include "Tools.h"
@@ -18,6 +42,8 @@ HRESULT MFSource::Initialize(IMFAttributes* attributes)
 
 	DWORD streamId = 0;
 	wil::com_ptr_nothrow<IMFSensorProfile> profile;
+	// Profile filter syntax: ((RES==<res>;FRT<op><num>,<den>;SUT==<subtype>))
+	// Empty fields mean "any value".  FRT<=30,1 = frame rate ≤ 30/1 fps.
 	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_Legacy, 0, nullptr, &profile));
 	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT<=30,1;SUT==))"));
 	RETURN_IF_FAILED(collection->AddProfile(profile.get()));
@@ -123,7 +149,8 @@ STDMETHODIMP MFSource::CreatePresentationDescriptor(IMFPresentationDescriptor** 
 STDMETHODIMP MFSource::GetCharacteristics(DWORD* pdwCharacteristics)
 {
 	RETURN_HR_IF_NULL(E_POINTER, pdwCharacteristics);
-
+	// MFMEDIASOURCE_IS_LIVE tells MF that we don't support seeking/pausing —
+	// only real-time playback.  Correct for a virtual camera.
 	*pdwCharacteristics = MFMEDIASOURCE_IS_LIVE;
 	return S_OK;
 }
@@ -281,6 +308,9 @@ STDMETHODIMP MFSource::SetMediaType(DWORD dwStreamID, IMFMediaType* pMediaType)
 
 STDMETHODIMP MFSource::GetService(REFGUID siid, REFIID iid, LPVOID* ppvObject)
 {
+	// The Frame Server queries for IMFDeviceController{2} via GetService.
+	// Returning MF_E_UNSUPPORTED_SERVICE is the documented way to decline —
+	// it tells MF we don't support device-level control commands.
 	if (iid == __uuidof(IMFDeviceController) || iid == __uuidof(IMFDeviceController2))
 		return MF_E_UNSUPPORTED_SERVICE;
 
@@ -314,12 +344,14 @@ STDMETHODIMP MFSource::GetAllocatorUsage(DWORD dwOutputStreamID, DWORD* pdwInput
 	return S_OK;
 }
 
+// IKsControl stubs — the Frame Server queries these for camera controls
+// (zoom, focus, exposure, etc.).  ERROR_SET_NOT_FOUND is the standard way
+// to indicate "this property set is not supported" at the source level.
 STDMETHODIMP_(NTSTATUS) MFSource::KsProperty(PKSPROPERTY property, ULONG length, LPVOID data, ULONG dataLength, ULONG* bytesReturned)
 {
 	RETURN_HR_IF_NULL(E_POINTER, property);
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
 	winrt::slim_lock_guard lock(_lock);
-
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
@@ -328,7 +360,6 @@ STDMETHODIMP_(NTSTATUS) MFSource::KsMethod(PKSMETHOD method, ULONG length, LPVOI
 	RETURN_HR_IF_NULL(E_POINTER, method);
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
 	winrt::slim_lock_guard lock(_lock);
-
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
@@ -336,6 +367,5 @@ STDMETHODIMP_(NTSTATUS) MFSource::KsEvent(PKSEVENT evt, ULONG length, LPVOID dat
 {
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
 	winrt::slim_lock_guard lock(_lock);
-
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }

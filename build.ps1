@@ -7,7 +7,7 @@
 #   - CMake 3.20+ on PATH  (https://cmake.org/download/)
 #   - Visual Studio 2022 with "Desktop development with C++" workload
 #   - vcpkg with the following packages installed:
-#       vcpkg install wil cppwinrt
+#       vcpkg install wil
 #     Set $env:VCPKG_ROOT or pass -VcpkgRoot to point at your vcpkg clone.
 #     If neither is provided the script probes common install locations.
 #
@@ -95,7 +95,7 @@ vcpkg not found. Fix one of:
   2. Pass -VcpkgRoot "C:\path\to\vcpkg"
 
 Required packages after installing:
-  vcpkg install wil cppwinrt
+  vcpkg install wil
 "@
 }
 

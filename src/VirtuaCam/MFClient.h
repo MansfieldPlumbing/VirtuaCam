@@ -1,6 +1,11 @@
 #pragma once
 
 #include "BrokerClient.h"
+#include <atomic>
+
+// Count of live COM objects (and server locks) in this module.
+// DllCanUnloadNow() reports S_OK only when this reaches zero.
+extern std::atomic<long> g_moduleObjectCount;
 
 template <class IFACE = IMFAttributes>
 struct CBaseAttributes : public IFACE
@@ -199,24 +204,32 @@ public:
 struct MFSource;
 struct MFStream;
 
-struct MFActivate : winrt::implements<MFActivate, CBaseAttributes<IMFActivate>>
+struct MFActivate final : CBaseAttributes<IMFActivate>
 {
 public:
+	// IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv);
+	STDMETHODIMP_(ULONG) AddRef();
+	STDMETHODIMP_(ULONG) Release();
+	// IMFActivate
 	STDMETHOD(ActivateObject(REFIID riid, void** ppv));
 	STDMETHOD(ShutdownObject)();
 	STDMETHOD(DetachObject)();
-	MFActivate() { SetBaseAttributesTraceName(L"ActivatorAtts"); }
+	MFActivate() { g_moduleObjectCount++; SetBaseAttributesTraceName(L"ActivatorAtts"); }
+	virtual ~MFActivate() { g_moduleObjectCount--; }
 	HRESULT Initialize();
 private:
-#if _DEBUG
-	int32_t query_interface_tearoff(winrt::guid const& id, void** object) const noexcept;
-#endif
-	winrt::com_ptr<MFSource> _source;
+	std::atomic<ULONG> _refCount{ 1 };
+	wil::com_ptr_nothrow<MFSource> _source;
 };
 
-struct MFSource : winrt::implements<MFSource, CBaseAttributes<IMFAttributes>, IMFMediaSource2, IMFGetService, IKsControl, IMFSampleAllocatorControl>
+struct MFSource final : CBaseAttributes<IMFAttributes>, IMFMediaSource2, IMFGetService, IKsControl, IMFSampleAllocatorControl
 {
 public:
+	// IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv);
+	STDMETHODIMP_(ULONG) AddRef();
+	STDMETHODIMP_(ULONG) Release();
 	STDMETHOD(BeginGetEvent)(IMFAsyncCallback* pCallback, IUnknown* punkState);
 	STDMETHOD(EndGetEvent)(IMFAsyncResult* pResult, IMFMediaEvent** ppEvent);
 	STDMETHOD(GetEvent)(DWORD dwFlags, IMFMediaEvent** ppEvent);
@@ -240,23 +253,26 @@ public:
 
 public:
 	MFSource();
+	virtual ~MFSource() { g_moduleObjectCount--; }
 	HRESULT Initialize(IMFAttributes* attributes);
 private:
-#if _DEBUG
-	int32_t query_interface_tearoff(winrt::guid const& id, void** object) const noexcept;
-#endif
 	int GetStreamIndexById(DWORD id);
 private:
 	const int _numStreams = 1;
-	winrt::slim_mutex _lock;
-	winrt::com_array<wil::com_ptr_nothrow<MFStream>> _streams;
+	std::atomic<ULONG> _refCount{ 1 };
+	wil::srwlock _lock;
+	std::vector<wil::com_ptr_nothrow<MFStream>> _streams;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFPresentationDescriptor> _descriptor;
 };
 
-struct MFStream : winrt::implements<MFStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl>
+struct MFStream final : CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl
 {
 public:
+	// IUnknown
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv);
+	STDMETHODIMP_(ULONG) AddRef();
+	STDMETHODIMP_(ULONG) Release();
 	STDMETHOD(BeginGetEvent)(IMFAsyncCallback* pCallback, IUnknown* punkState);
 	STDMETHOD(EndGetEvent)(IMFAsyncResult* pResult, IMFMediaEvent** ppEvent);
 	STDMETHOD(GetEvent)(DWORD dwFlags, IMFMediaEvent** ppEvent);
@@ -271,7 +287,8 @@ public:
 	STDMETHOD_(NTSTATUS, KsEvent)(PKSEVENT Event, ULONG EventLength, LPVOID EventData, ULONG DataLength, ULONG* BytesReturned);
 
 public:
-	MFStream() : _index(0), _state(MF_STREAM_STATE_STOPPED), _format(GUID_NULL), _initialWidth(0), _initialHeight(0), _currentWidth(0), _currentHeight(0) { SetBaseAttributesTraceName(L"MediaStreamAtts"); }
+	MFStream() : _index(0), _state(MF_STREAM_STATE_STOPPED), _format(GUID_NULL), _initialWidth(0), _initialHeight(0), _currentWidth(0), _currentHeight(0) { g_moduleObjectCount++; SetBaseAttributesTraceName(L"MediaStreamAtts"); }
+	virtual ~MFStream() { g_moduleObjectCount--; }
 	HRESULT Initialize(IMFMediaSource* source, int index);
 	HRESULT SetAllocator(IUnknown* allocator);
 	MFSampleAllocatorUsage GetAllocatorUsage();
@@ -280,10 +297,8 @@ public:
 	HRESULT Stop();
 	void Shutdown();
 private:
-#if _DEBUG
-	int32_t query_interface_tearoff(winrt::guid const& id, void** object) const noexcept override { RETURN_HR_MSG(E_NOINTERFACE, "MediaStream QueryInterface failed on IID %s", GUID_ToStringW(id).c_str()); }
-#endif
-	winrt::slim_mutex  _lock;
+	std::atomic<ULONG> _refCount{ 1 };
+	wil::srwlock  _lock;
 	MF_STREAM_STATE _state;
 	BrokerClient _brokerClient;
 	GUID _format;

@@ -46,6 +46,8 @@ const WCHAR* REG_SUBKEY = L"Software\\VirtuaCam";
 const WCHAR* REG_VAL_PIPTL = L"ShowPipTopLeft";
 const WCHAR* REG_VAL_PIPTR = L"ShowPipTopRight";
 const WCHAR* REG_VAL_PIPBL = L"ShowPipBottomLeft";
+const WCHAR* REG_RUN_SUBKEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const WCHAR* REG_RUN_VALUE = L"VirtuaCam";
 
 bool IsRunningAsAdmin();
 HRESULT LoadBroker();
@@ -62,6 +64,31 @@ bool GetPipBlEnabled() { return g_showPipBL; }
 void TogglePipTl() { g_showPipTL = !g_showPipTL; SaveSettings(); }
 void TogglePipTr() { g_showPipTR = !g_showPipTR; SaveSettings(); }
 void TogglePipBl() { g_showPipBL = !g_showPipBL; SaveSettings(); }
+
+// --- "Start with Windows" (HKCU Run key) ---
+
+bool GetAutostartEnabled() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_RUN_SUBKEY, 0, KEY_READ, &hKey) != ERROR_SUCCESS) return false;
+    bool enabled = RegQueryValueExW(hKey, REG_RUN_VALUE, NULL, NULL, NULL, NULL) == ERROR_SUCCESS;
+    RegCloseKey(hKey);
+    return enabled;
+}
+
+void ToggleAutostart() {
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_RUN_SUBKEY, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) return;
+    if (RegQueryValueExW(hKey, REG_RUN_VALUE, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+        RegDeleteValueW(hKey, REG_RUN_VALUE);
+    } else {
+        WCHAR exePath[MAX_PATH];
+        if (GetModuleFileNameW(NULL, exePath, MAX_PATH)) {
+            std::wstring quoted = L"\"" + std::wstring(exePath) + L"\"";
+            RegWriteValue(hKey, REG_RUN_VALUE, quoted);
+        }
+    }
+    RegCloseKey(hKey);
+}
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
 const SourceState& GetMainSourceState() { return g_mainSourceState; }
@@ -119,11 +146,13 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
         case SourceMode::Camera:
             g_mainSourceState.cameraIndex = static_cast<int>(context);
             g_mainSourceState.pid = LaunchProducer(L"main_camera", L"--type camera --device " + std::to_wstring(g_mainSourceState.cameraIndex));
+            if (!g_mainSourceState.pid) UI_ShowTrayNotification(L"VirtuaCam", L"Failed to start the camera producer. Is VirtuaCamProcess.exe next to VirtuaCam.exe?");
             break;
         case SourceMode::Window:
             g_mainSourceState.hwnd = reinterpret_cast<HWND>(context);
             if(g_mainSourceState.hwnd) {
                 g_mainSourceState.pid = LaunchProducer(L"main_window", L"--type capture --hwnd " + std::to_wstring((UINT64)g_mainSourceState.hwnd));
+                if (!g_mainSourceState.pid) UI_ShowTrayNotification(L"VirtuaCam", L"Failed to start the window-capture producer. Is VirtuaCamProcess.exe next to VirtuaCam.exe?");
             }
             break;
         case SourceMode::Discovered:
@@ -163,11 +192,13 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
         case SourceMode::Camera:
             state.cameraIndex = static_cast<int>(context);
             state.pid = LaunchProducer(key_prefix + L"_camera", L"--type camera --device " + std::to_wstring(state.cameraIndex));
+            if (!state.pid) UI_ShowTrayNotification(L"VirtuaCam", L"Failed to start the camera producer for this PIP slot.");
             break;
         case SourceMode::Window:
             state.hwnd = reinterpret_cast<HWND>(context);
             if (state.hwnd) {
                 state.pid = LaunchProducer(key_prefix + L"_window", L"--type capture --hwnd " + std::to_wstring((UINT64)state.hwnd));
+                if (!state.pid) UI_ShowTrayNotification(L"VirtuaCam", L"Failed to start the window-capture producer for this PIP slot.");
             }
             break;
         case SourceMode::Discovered:
@@ -190,7 +221,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
     if (FAILED(LoadBroker())) {
@@ -282,7 +312,7 @@ HRESULT LoadBroker() {
 }
 
 HRESULT RegisterVirtualCamera() {
-    auto clsid = GUID_ToStringW(CLSID_VCam, false);
+    auto clsid = GUID_ToStringW(CLSID_VCam);
     RETURN_IF_FAILED_MSG(MFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
     RETURN_IF_FAILED_MSG(g_vcam->Start(nullptr), "Cannot start VCam");
     return S_OK;

@@ -54,7 +54,7 @@ VirtuaCam's architecture relies on several key Windows technologies to achieve i
     *   Window/Screen Capture (`DirectPortMFGraphicsCapture.dll`)
     *   Physical Webcam Passthrough (`DirectPortMFCamera.dll`)
     *   Generic Consumer/Filter (`DirectPortConsumer.dll`)
-*   **Modern C++ Implementation:** Built with C++20 and robust Windows libraries like WIL and C++/WinRT for stability and maintainability, using a modern CMake build system.
+*   **Modern C++ Implementation:** Built with C++20, plain COM, and the Windows Implementation Library (WIL) for stability and maintainability, using a modern CMake build system. The codebase deliberately avoids the C++/WinRT projection; the one WinRT API used (Windows.Graphics.Capture, for window capture) is accessed at the raw COM ABI level.
 
 ## How to Use VirtuaCam
 
@@ -70,11 +70,10 @@ Before building, ensure you have the following installed:
 
 #### Vcpkg Dependencies
 
-This project requires two libraries that can be installed via vcpkg. Open your terminal and run the following commands:
+This project requires one library that can be installed via vcpkg. Open your terminal and run the following command:
 
 ```sh
 vcpkg install wil
-vcpkg install cppwinrt
 ```
 
 The build script is pre-configured to find vcpkg in its default installation path (`C:\vcpkg`). If you have it installed elsewhere, you can specify the path when running the build script:
@@ -124,10 +123,15 @@ Open an application like the **Windows Camera App**, **Zoom**, **Discord**, or *
 
 ---
 
+## Roadmap & Design Notes
+
+*   [Integrating a user-mode virtual display driver (IddCx)](docs/VIRTUAL_DISPLAY_DRIVER.md) — expose a virtual monitor whose desktop feeds the camera.
+*   [Running VirtuaCam as a Windows service](docs/WINDOWS_SERVICE.md) — boot-time camera availability with a non-elevated tray controller.
+
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 ## Acknowledgements
 
-A special thank you to the developer of the **[VCamSample](https://github.com/smourier/VCamSample)** project. VCamSample provided an excellent and clear foundational example of a Media Foundation virtual camera. Its well-structured code served as an invaluable educational resource and a starting point for understanding the core concepts involved in this project.
+Thanks to the developer of the **[VCamSample](https://github.com/smourier/VCamSample)** project, which served as a valuable educational reference for Media Foundation virtual camera concepts during early development. The current Media Foundation source in this repository is an independent implementation written against the documented COM interfaces.

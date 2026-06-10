@@ -100,6 +100,7 @@
 #define ID_SETTINGS_PIP_TL              18001   // Toggle PiP top-left visibility
 #define ID_SETTINGS_PIP_TR              18002   // Toggle PiP top-right visibility
 #define ID_SETTINGS_PIP_BL              18003   // Toggle PiP bottom-left visibility
+#define ID_SETTINGS_AUTOSTART           18004   // Toggle "Start with Windows"
 
 // =============================================================================
 // Enumerations

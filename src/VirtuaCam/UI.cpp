@@ -33,6 +33,8 @@ extern bool GetPipBlEnabled();
 extern void TogglePipTl();
 extern void TogglePipTr();
 extern void TogglePipBl();
+extern bool GetAutostartEnabled();
+extern void ToggleAutostart();
 
 struct EnumWindowsData { std::vector<CapturableWindow>* windows; };
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
@@ -295,6 +297,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
             else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
             else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
+            else if (id == ID_SETTINGS_AUTOSTART) ToggleAutostart();
             else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
             else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
             else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
@@ -463,6 +466,8 @@ void ShowContextMenu(HWND hwnd) {
         settingsMenu->AddItem(L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
         settingsMenu->AddItem(L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
         settingsMenu->AddItem(L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+        settingsMenu->AddSeparator();
+        settingsMenu->AddItem(L"Start with Windows", ID_SETTINGS_AUTOSTART, GetAutostartEnabled());
     }
 
     menu->AddItem(L"About", ID_TRAY_ABOUT);
@@ -518,6 +523,9 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             if (g_hTelemetryLabel) SetWindowPos(g_hTelemetryLabel, NULL, 0, 0, width, 20, SWP_NOZORDER);
         }
         break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) DestroyWindow(hwnd);
+        break;
     case WM_CLOSE: DestroyWindow(hwnd); break;
     case WM_DESTROY: CleanupD3D(); g_hPreviewWnd = NULL; g_hTelemetryLabel = NULL; break;
     default: return DefWindowProc(hwnd, message, wParam, lParam);
@@ -547,6 +555,27 @@ void AddTrayIcon(HWND hwnd, bool add) {
     }
 }
 
+void UI_ShowTrayNotification(const std::wstring& title, const std::wstring& message) {
+    if (!g_hMainWnd) return;
+    NOTIFYICONDATA nid = { sizeof(nid) }; nid.hWnd = g_hMainWnd; nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_WARNING;
+    wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, message.c_str(), _TRUNCATE);
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
+// Keeps the tray tooltip in sync with the broker state so the user can see
+// the connection status without opening the preview window.
+static void UpdateTrayTooltip(const wchar_t* status) {
+    if (!g_hMainWnd) return;
+    NOTIFYICONDATA nid = { sizeof(nid) }; nid.hWnd = g_hMainWnd; nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    std::wstring tip = std::wstring(L"VirtuaCam — ") + status;
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
 void CreatePreviewWindow() {
     if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
         ShowWindow(g_hPreviewWnd, SW_SHOW); SetForegroundWindow(g_hPreviewWnd); return;
@@ -558,15 +587,20 @@ void CreatePreviewWindow() {
 }
 
 void UpdateTelemetry(BrokerState currentState) {
-    if (!g_hTelemetryLabel) return;
     static BrokerState lastState = (BrokerState)-1;
-    if (currentState != lastState) {
-        lastState = currentState;
-        switch (currentState) {
-        case BrokerState::Searching: SetWindowText(g_hTelemetryLabel, L"Status: Searching for Producer..."); break;
-        case BrokerState::Connected: SetWindowText(g_hTelemetryLabel, L"Status: Connected to Producer"); break;
-        case BrokerState::Failed: SetWindowText(g_hTelemetryLabel, L"Status: Disconnected / No Producer Found"); break;
-        }
+    if (currentState == lastState) return;
+    lastState = currentState;
+
+    const wchar_t* status = L"";
+    switch (currentState) {
+    case BrokerState::Searching: status = L"Searching for Producer..."; break;
+    case BrokerState::Connected: status = L"Connected to Producer"; break;
+    case BrokerState::Failed: status = L"Disconnected / No Producer Found"; break;
+    }
+
+    UpdateTrayTooltip(status);
+    if (g_hTelemetryLabel) {
+        SetWindowText(g_hTelemetryLabel, (std::wstring(L"Status: ") + status).c_str());
     }
 }
 

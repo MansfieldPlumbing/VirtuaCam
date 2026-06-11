@@ -7,6 +7,7 @@
 #include "Discovery.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#include <cstdint>
 #include <dwmapi.h>
 #include <map>
 
@@ -97,6 +98,10 @@ static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
 
+// Staging texture for the in-menu preview thumbnail (lives on the broker's
+// device; recreated if the broker output size changes).
+static ComPtr<ID3D11Texture2D> g_menuPreviewStaging;
+
 static ComPtr<ID3D11Device> g_device;
 static ComPtr<ID3D11DeviceContext> g_context;
 static ComPtr<IDXGISwapChain> g_swapChain;
@@ -138,9 +143,61 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     return tex.Sample(smp, uv);
 })";
 
+// Copies the broker's current output frame to the CPU for the in-menu preview
+// thumbnail.  Runs on the UI thread (same thread that drives the broker's
+// render loop), so no synchronisation with the broker is needed.
+static bool GetBrokerPreviewFrame(std::vector<uint32_t>& bgra, UINT& width, UINT& height) {
+    if (!g_pfnGetSharedTexture) return false;
+    ID3D11Texture2D* tex = g_pfnGetSharedTexture();
+    if (!tex) return false;
+
+    ComPtr<ID3D11Device> device;
+    tex->GetDevice(&device);
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(&context);
+
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
+
+    if (g_menuPreviewStaging) {
+        D3D11_TEXTURE2D_DESC stagingDesc;
+        g_menuPreviewStaging->GetDesc(&stagingDesc);
+        if (stagingDesc.Width != desc.Width || stagingDesc.Height != desc.Height)
+            g_menuPreviewStaging.Reset();
+    }
+    if (!g_menuPreviewStaging) {
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.MiscFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MipLevels = 1;
+        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &g_menuPreviewStaging)))
+            return false;
+    }
+
+    context->CopyResource(g_menuPreviewStaging.Get(), tex);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(context->Map(g_menuPreviewStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return false;
+
+    width = desc.Width;
+    height = desc.Height;
+    bgra.resize((size_t)width * height);
+    for (UINT y = 0; y < height; y++) {
+        const uint32_t* src = (const uint32_t*)((const BYTE*)mapped.pData + (size_t)y * mapped.RowPitch);
+        uint32_t* dst = bgra.data() + (size_t)y * width;
+        for (UINT x = 0; x < width; x++)
+            dst[x] = src[x] | 0xFF000000u;   // force opaque alpha for GDI blits
+    }
+    context->Unmap(g_menuPreviewStaging.Get(), 0);
+    return true;
+}
+
 void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture) {
     g_instance = instance;
     g_pfnGetSharedTexture = pfnGetSharedTexture;
+    CustomMenu::SetPreviewProvider(GetBrokerPreviewFrame);
     LoadStringW(instance, IDC_VIRTUACAM, g_windowClass, MAX_LOADSTRING);
     MyRegisterClass(instance);
 
@@ -181,6 +238,7 @@ void UI_RunMessageLoop(std::function<void()> onIdle) {
 
 void UI_Shutdown() {
     AddTrayIcon(g_hMainWnd, false);
+    g_menuPreviewStaging.Reset();
     CleanupD3D();
 }
 
@@ -430,7 +488,9 @@ void ShowContextMenu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
 
     auto menu = new CustomMenu(hwnd, g_instance);
-    menu->AddItem(L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
+    // Live thumbnail of the camera output; clicking it opens the full preview.
+    menu->AddPreviewItem(ID_TRAY_PREVIEW_WINDOW);
+    menu->AddItem(L"Open Preview Window", ID_TRAY_PREVIEW_WINDOW);
     menu->AddSeparator();
 
     BuildSourceSubMenu(menu->AddSubMenu(L"Source"), false);
@@ -498,6 +558,12 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
     {
         BOOL useDarkMode = TRUE;
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
+        // Match the tray menu: Mica backdrop (visible on the title bar) and
+        // rounded corners — DWM clips the swap chain to the rounded shape.
+        DWM_SYSTEMBACKDROP_TYPE backdropType = DWMSBT_MAINWINDOW;
+        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+        DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
         if (FAILED(InitD3D(hwnd)) || FAILED(LoadAssets())) {
             MessageBox(hwnd, L"Failed to initialize D3D for preview.", L"Error", MB_OK | MB_ICONERROR);
             return -1;

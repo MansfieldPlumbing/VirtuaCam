@@ -275,31 +275,28 @@ HANDLE GetHandleFromName(const WCHAR* name)
 // ---------------------------------------------------------------------------
 // "No Signal" placeholder texture
 // ---------------------------------------------------------------------------
-// CPU-rasters a static black frame with "NO SIGNAL" centred, using a small
-// embedded 5x7 bitmap font, then uploads it as an immutable texture.
-// Displaying the placeholder is a single CopyResource per frame — no shaders,
-// no animation, no per-frame CPU work.
+// CPU-rasters a static placeholder frame once and uploads it as an immutable
+// texture: a subtle dark radial-gradient background with a pre-rendered
+// "NO SIGNAL" wordmark (Selawik, letter-spaced — see NoSignalMask.h) blended
+// in the centre.  Displaying the placeholder is a single CopyResource per
+// frame — no shaders, no animation, no per-frame CPU work.
+
+#include "NoSignalMask.h"
 
 namespace
 {
-    // 5x7 glyphs; one byte per row, low 5 bits used, MSB-side is the left column.
-    struct Glyph { wchar_t ch; unsigned char rows[7]; };
-    constexpr Glyph k_glyphs[] = {
-        { L'N', { 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 } },
-        { L'O', { 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 } },
-        { L'S', { 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 } },
-        { L'I', { 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111 } },
-        { L'G', { 0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111 } },
-        { L'A', { 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 } },
-        { L'L', { 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 } },
-    };
-
-    const unsigned char* FindGlyph(wchar_t ch)
+    // Bilinear sample of the wordmark alpha mask at fractional coordinates.
+    float SampleMask(float x, float y)
     {
-        for (const auto& g : k_glyphs)
-            if (g.ch == ch)
-                return g.rows;
-        return nullptr;  // space / unknown -> blank cell
+        if (x < 0 || y < 0 || x > kNoSignalMaskWidth - 1.0f || y > kNoSignalMaskHeight - 1.0f)
+            return 0.0f;
+        const UINT x0 = (UINT)x, y0 = (UINT)y;
+        const UINT x1 = std::min(x0 + 1, kNoSignalMaskWidth - 1);
+        const UINT y1 = std::min(y0 + 1, kNoSignalMaskHeight - 1);
+        const float fx = x - x0, fy = y - y0;
+        const float top = kNoSignalMask[y0 * kNoSignalMaskWidth + x0] * (1 - fx) + kNoSignalMask[y0 * kNoSignalMaskWidth + x1] * fx;
+        const float bot = kNoSignalMask[y1 * kNoSignalMaskWidth + x0] * (1 - fx) + kNoSignalMask[y1 * kNoSignalMaskWidth + x1] * fx;
+        return (top * (1 - fy) + bot * fy) / 255.0f;
     }
 }
 
@@ -310,38 +307,56 @@ HRESULT CreateNoSignalTexture(ID3D11Device* device, UINT width, UINT height, ID3
     *outTexture = nullptr;
     RETURN_HR_IF(E_INVALIDARG, !width || !height);
 
-    constexpr const wchar_t* text = L"NO SIGNAL";
-    constexpr UINT textLen = 9;
-    constexpr UINT glyphW = 5, glyphH = 7;
-    constexpr UINT cellW = glyphW + 1;              // one column of spacing per cell
-    constexpr UINT textCols = textLen * cellW - 1;  // no trailing space column
-
-    // Text height ~1/14th of the frame, but never wider than 2/3rds of it.
-    UINT scale = std::max(1u, height / (14 * glyphH));
-    while (scale > 1 && textCols * scale > width * 2 / 3)
-        scale--;
-
-    std::vector<uint32_t> pixels((size_t)width * height, 0xFF000000u);  // opaque black
-
-    const UINT originX = (width  > textCols * scale) ? (width  - textCols * scale) / 2 : 0;
-    const UINT originY = (height > glyphH  * scale) ? (height - glyphH  * scale) / 2 : 0;
-    constexpr uint32_t textColor = 0xFF9E9E9Eu;  // neutral grey
-
-    for (UINT c = 0; c < textLen; c++)
+    // Background: subtle radial gradient, slightly cool dark grey falling off
+    // to near-black at the corners.  Rastered once, so per-pixel cost is free.
+    std::vector<uint32_t> pixels((size_t)width * height);
     {
-        const unsigned char* rows = FindGlyph(text[c]);
-        if (!rows)
-            continue;
-        for (UINT gy = 0; gy < glyphH; gy++)
-            for (UINT gx = 0; gx < glyphW; gx++)
+        constexpr float centerR = 24.0f, centerG = 26.0f, centerB = 30.0f;
+        constexpr float edgeR   =  7.0f, edgeG   =  8.0f, edgeB   = 10.0f;
+        const float cx = width * 0.5f, cy = height * 0.5f;
+        const float invMaxDist = 1.0f / std::sqrt(cx * cx + cy * cy);
+        for (UINT y = 0; y < height; y++)
+        {
+            const float dy = (float)y - cy;
+            for (UINT x = 0; x < width; x++)
             {
-                if (!(rows[gy] & (1u << (glyphW - 1 - gx))))
+                const float dx = (float)x - cx;
+                float t = std::sqrt(dx * dx + dy * dy) * invMaxDist;
+                t = t * t * (3.0f - 2.0f * t);  // smoothstep for a soft falloff
+                const uint32_t r = (uint32_t)(centerR + (edgeR - centerR) * t);
+                const uint32_t g = (uint32_t)(centerG + (edgeG - centerG) * t);
+                const uint32_t b = (uint32_t)(centerB + (edgeB - centerB) * t);
+                pixels[(size_t)y * width + x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    // Wordmark: ~1/12th of the frame height, never wider than half the frame,
+    // alpha-blended over the gradient with bilinear scaling.
+    {
+        float scale = (height / 12.0f) / kNoSignalMaskHeight;
+        if (kNoSignalMaskWidth * scale > width * 0.5f)
+            scale = (width * 0.5f) / kNoSignalMaskWidth;
+        const UINT outW = std::max(1u, (UINT)(kNoSignalMaskWidth  * scale));
+        const UINT outH = std::max(1u, (UINT)(kNoSignalMaskHeight * scale));
+        const UINT originX = (width  > outW) ? (width  - outW) / 2 : 0;
+        const UINT originY = (height > outH) ? (height - outH) / 2 : 0;
+        constexpr float textR = 0x8A, textG = 0x8F, textB = 0x98;  // soft grey, slightly cool
+
+        for (UINT y = 0; y < outH && originY + y < height; y++)
+            for (UINT x = 0; x < outW && originX + x < width; x++)
+            {
+                const float a = SampleMask(x / scale, y / scale);
+                if (a <= 0.0f)
                     continue;
-                const UINT px = originX + (c * cellW + gx) * scale;
-                const UINT py = originY + gy * scale;
-                for (UINT sy = 0; sy < scale && py + sy < height; sy++)
-                    for (UINT sx = 0; sx < scale && px + sx < width; sx++)
-                        pixels[(size_t)(py + sy) * width + (px + sx)] = textColor;
+                uint32_t& dst = pixels[(size_t)(originY + y) * width + (originX + x)];
+                const float bgR = (float)((dst >> 16) & 0xFF);
+                const float bgG = (float)((dst >>  8) & 0xFF);
+                const float bgB = (float)( dst        & 0xFF);
+                const uint32_t r = (uint32_t)(bgR + (textR - bgR) * a);
+                const uint32_t g = (uint32_t)(bgG + (textG - bgG) * a);
+                const uint32_t b = (uint32_t)(bgB + (textB - bgB) * a);
+                dst = 0xFF000000u | (r << 16) | (g << 8) | b;
             }
     }
 

@@ -50,6 +50,26 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 })";
 
 // ---------------------------------------------------------------------------
+// Aspect-fit helper
+// ---------------------------------------------------------------------------
+// Returns the largest viewport that fits the source aspect ratio inside the
+// destination rectangle, centred (letterboxed/pillarboxed on the cleared
+// background).  Falls back to the full rectangle if dimensions are unknown.
+
+static D3D11_VIEWPORT FitViewport(float dstX, float dstY, float dstW, float dstH, UINT srcW, UINT srcH)
+{
+    D3D11_VIEWPORT vp = { dstX, dstY, dstW, dstH, 0.0f, 1.0f };
+    if (srcW && srcH) {
+        const float scale = std::min(dstW / (float)srcW, dstH / (float)srcH);
+        vp.Width    = srcW * scale;
+        vp.Height   = srcH * scale;
+        vp.TopLeftX = dstX + (dstW - vp.Width)  * 0.5f;
+        vp.TopLeftY = dstY + (dstH - vp.Height) * 0.5f;
+    }
+    return vp;
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
@@ -194,11 +214,17 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     if (!hTexture || FAILED(device1->OpenSharedResource1(hTexture.get(), IID_PPV_ARGS(&newRes.sharedTexture)))) return E_FAIL;
     if (!hFence   || FAILED(device5->OpenSharedFence(    hFence.get(),   IID_PPV_ARGS(&newRes.sharedFence))))   return E_FAIL;
 
-    // Create a private copy of the texture (shared textures can't be bound as SRVs).
+    // Create a private copy of the texture (shared textures can't be bound as
+    // SRVs).  The copy carries a full mip chain so that PiP downscaling samples
+    // through the mips (MIN_MAG_MIP_LINEAR) instead of aliasing/shimmering when
+    // a large source is shrunk into a small corner tile.
     D3D11_TEXTURE2D_DESC sharedDesc;
     newRes.sharedTexture->GetDesc(&sharedDesc);
-    sharedDesc.MiscFlags  = 0;
-    sharedDesc.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+    newRes.width  = sharedDesc.Width;
+    newRes.height = sharedDesc.Height;
+    sharedDesc.MipLevels  = 0;  // full mip chain
+    sharedDesc.MiscFlags  = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    sharedDesc.BindFlags  = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     sharedDesc.Usage      = D3D11_USAGE_DEFAULT;
 
     RETURN_IF_FAILED(m_device->CreateTexture2D(&sharedDesc, nullptr, &newRes.privateTexture));
@@ -238,6 +264,7 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
 
     // For each connected producer, check if a new frame is available.
     // Wait on the producer's fence (GPU-side) then copy to our private texture.
+    bool contentChanged = false;
     for (auto& res : m_producerResources) {
         wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE,
             (L"DirectPort_Producer_Manifest_" + std::to_wstring(res.pid)).c_str()));
@@ -249,11 +276,32 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         UINT64 latestFrame = pView->frameValue;
         if (latestFrame > res.lastSeenFrame) {
             m_context4->Wait(res.sharedFence.Get(), latestFrame);
-            m_context->CopyResource(res.privateTexture.Get(), res.sharedTexture.Get());
+            // CopySubresourceRegion (not CopyResource): the private texture has
+            // a full mip chain while the shared texture has a single mip, so
+            // only mip 0 is copied, then the chain is regenerated.
+            m_context->CopySubresourceRegion(res.privateTexture.Get(), 0, 0, 0, 0, res.sharedTexture.Get(), 0, nullptr);
+            if (res.privateSRV)
+                m_context->GenerateMips(res.privateSRV.Get());
             res.lastSeenFrame = latestFrame;
+            contentChanged = true;
         }
         UnmapViewOfFile(pView);
     }
+
+    // Composite-skip: if no producer delivered a new frame and the layout is
+    // unchanged, the previous output is still correct — skip the draw and the
+    // fence signal entirely.  Downstream consumers only copy when the fence
+    // advances, so they simply keep showing the last frame.
+    std::vector<DWORD> layoutPids;
+    layoutPids.reserve(producers.size());
+    for (const auto& p : producers)
+        layoutPids.push_back(p.processId);
+    const bool layoutChanged = !m_hasComposited || isGridMode != m_lastGridMode || layoutPids != m_lastLayoutPids;
+    if (!contentChanged && !layoutChanged)
+        return;
+    m_lastLayoutPids = std::move(layoutPids);
+    m_lastGridMode = isGridMode;
+    m_hasComposited = true;
 
     // --- Step 2: Clear the composite render target ---
 
@@ -281,8 +329,9 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         primarySourceRes = find_resource(producers[0].processId);
 
     if (primarySourceRes && primarySourceRes->privateSRV) {
-        // Blit the primary source at full output resolution.
-        D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)MUX_WIDTH, (float)MUX_HEIGHT, 0.0f, 1.0f };
+        // Blit the primary source aspect-fit into the full output (letterboxed
+        // onto the black clear when the source aspect differs).
+        D3D11_VIEWPORT vp = FitViewport(0.0f, 0.0f, (float)MUX_WIDTH, (float)MUX_HEIGHT, primarySourceRes->width, primarySourceRes->height);
         m_context->RSSetViewports(1, &vp);
         m_context->VSSetShader(m_blitVS.Get(), nullptr, 0);
         m_context->PSSetShader(m_blitPS.Get(), nullptr, 0);
@@ -322,11 +371,14 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         };
 
         // producers[1] -> pip_vps[0] (TL), producers[2] -> pip_vps[1] (TR), etc.
+        // Each source is aspect-fit within its tile rather than stretched.
         for (size_t i = 1; i < producers.size() && i < 5; ++i) {
             if (producers[i].processId != 0) {
                 ProducerGpuResources* res = find_resource(producers[i].processId);
                 if (res && res->privateSRV) {
-                    m_context->RSSetViewports(1, &pip_vps[i - 1]);
+                    const D3D11_VIEWPORT& tile = pip_vps[i - 1];
+                    D3D11_VIEWPORT vp = FitViewport(tile.TopLeftX, tile.TopLeftY, tile.Width, tile.Height, res->width, res->height);
+                    m_context->RSSetViewports(1, &vp);
                     m_context->PSSetShaderResources(0, 1, res->privateSRV.GetAddressOf());
                     m_context->Draw(3, 0);
                 }

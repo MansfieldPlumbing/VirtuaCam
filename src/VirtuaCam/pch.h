@@ -12,6 +12,8 @@
 
 // Trim down the Windows.h surface area to reduce compile time.
 #define WIN32_LEAN_AND_MEAN
+// Keep windows.h from defining min/max macros that break std::min/std::max.
+#define NOMINMAX
 
 // ---------------------------------------------------------------------------
 // Debug heap  (debug builds only)

@@ -14,6 +14,8 @@
 #include "pch.h"
 #include "Tools.h"
 #include <d3d12.h>
+#include <algorithm>
+#include <cstdint>
 
 // ---------------------------------------------------------------------------
 // String conversion helpers
@@ -268,4 +270,91 @@ HANDLE GetHandleFromName(const WCHAR* name)
     HANDLE handle = nullptr;
     d3d12Device->OpenSharedHandleByName(name, GENERIC_ALL, &handle);
     return handle;
+}
+
+// ---------------------------------------------------------------------------
+// "No Signal" placeholder texture
+// ---------------------------------------------------------------------------
+// CPU-rasters a static black frame with "NO SIGNAL" centred, using a small
+// embedded 5x7 bitmap font, then uploads it as an immutable texture.
+// Displaying the placeholder is a single CopyResource per frame — no shaders,
+// no animation, no per-frame CPU work.
+
+namespace
+{
+    // 5x7 glyphs; one byte per row, low 5 bits used, MSB-side is the left column.
+    struct Glyph { wchar_t ch; unsigned char rows[7]; };
+    constexpr Glyph k_glyphs[] = {
+        { L'N', { 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 } },
+        { L'O', { 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 } },
+        { L'S', { 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 } },
+        { L'I', { 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111 } },
+        { L'G', { 0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111 } },
+        { L'A', { 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 } },
+        { L'L', { 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 } },
+    };
+
+    const unsigned char* FindGlyph(wchar_t ch)
+    {
+        for (const auto& g : k_glyphs)
+            if (g.ch == ch)
+                return g.rows;
+        return nullptr;  // space / unknown -> blank cell
+    }
+}
+
+HRESULT CreateNoSignalTexture(ID3D11Device* device, UINT width, UINT height, ID3D11Texture2D** outTexture)
+{
+    RETURN_HR_IF_NULL(E_POINTER, device);
+    RETURN_HR_IF_NULL(E_POINTER, outTexture);
+    *outTexture = nullptr;
+    RETURN_HR_IF(E_INVALIDARG, !width || !height);
+
+    constexpr const wchar_t* text = L"NO SIGNAL";
+    constexpr UINT textLen = 9;
+    constexpr UINT glyphW = 5, glyphH = 7;
+    constexpr UINT cellW = glyphW + 1;              // one column of spacing per cell
+    constexpr UINT textCols = textLen * cellW - 1;  // no trailing space column
+
+    // Text height ~1/14th of the frame, but never wider than 2/3rds of it.
+    UINT scale = std::max(1u, height / (14 * glyphH));
+    while (scale > 1 && textCols * scale > width * 2 / 3)
+        scale--;
+
+    std::vector<uint32_t> pixels((size_t)width * height, 0xFF000000u);  // opaque black
+
+    const UINT originX = (width  > textCols * scale) ? (width  - textCols * scale) / 2 : 0;
+    const UINT originY = (height > glyphH  * scale) ? (height - glyphH  * scale) / 2 : 0;
+    constexpr uint32_t textColor = 0xFF9E9E9Eu;  // neutral grey
+
+    for (UINT c = 0; c < textLen; c++)
+    {
+        const unsigned char* rows = FindGlyph(text[c]);
+        if (!rows)
+            continue;
+        for (UINT gy = 0; gy < glyphH; gy++)
+            for (UINT gx = 0; gx < glyphW; gx++)
+            {
+                if (!(rows[gy] & (1u << (glyphW - 1 - gx))))
+                    continue;
+                const UINT px = originX + (c * cellW + gx) * scale;
+                const UINT py = originY + gy * scale;
+                for (UINT sy = 0; sy < scale && py + sy < height; sy++)
+                    for (UINT sx = 0; sx < scale && px + sx < width; sx++)
+                        pixels[(size_t)(py + sy) * width + (px + sx)] = textColor;
+            }
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width            = width;
+    desc.Height           = height;
+    desc.MipLevels        = 1;
+    desc.ArraySize        = 1;
+    desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage            = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init = { pixels.data(), width * 4, 0 };
+    RETURN_IF_FAILED(device->CreateTexture2D(&desc, &init, outTexture));
+    return S_OK;
 }

@@ -1,7 +1,6 @@
 #pragma once
 #include "Tools.h"
 #include "Discovery.h"
-#include "ShaderModule.h" // <-- ADDED
 #include <wrl/client.h>
 #include <d3d11_4.h>
 #include <vector>
@@ -45,7 +44,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> m_blitPS;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> m_blitSampler;
 
-    ShaderModule m_offModeShader; // <-- ADDED
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> m_noSignalTexture;  // Static "NO SIGNAL" frame shown when no primary source is live
 
     std::vector<ProducerGpuResources> m_producerResources;
 

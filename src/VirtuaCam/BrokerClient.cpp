@@ -11,8 +11,7 @@
 //      texture that can be wrapped in an IMFSample.
 //   3. Blit that private texture into a render target, then hand the result
 //      to Media Foundation as a video sample.
-//   4. If the broker is not running, render the ShaderModule "off mode" screen
-//      (an animated retro CRT) as a placeholder.
+//   4. If the broker is not running, show a static black "NO SIGNAL" frame.
 //   5. Optionally convert the RGB32 frame to NV12 via VideoProcessorMFT if
 //      the consumer has negotiated NV12 as the media type.
 // =============================================================================
@@ -85,12 +84,17 @@ HRESULT BrokerClient::ReconfigureFormat(UINT width, UINT height)
     _texture.reset();
     _textureRTV.reset();
     _converter.reset();
+    _noSignalTexture.reset();
 
     CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, 1, 1, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
     RETURN_IF_FAILED(device->CreateTexture2D(&desc, nullptr, &_texture));
     RETURN_IF_FAILED(device->CreateRenderTargetView(_texture.get(), nullptr, &_textureRTV));
     _width  = width;
     _height = height;
+
+    // Static placeholder shown whenever the broker is not running; sized to
+    // match _texture so off-mode is a single CopyResource.
+    RETURN_IF_FAILED(CreateNoSignalTexture(device.get(), width, height, &_noSignalTexture));
 
     // VideoProcessorMFT handles GPU-accelerated RGB32 -> NV12 conversion,
     // which is typically required for compatibility with most video conferencing
@@ -260,7 +264,6 @@ HRESULT BrokerClient::FindAndConnectToBroker()
 // SetD3DManager
 // ---------------------------------------------------------------------------
 // Called by Media Foundation when it provides us with the shared D3D device.
-// This is also the point at which we initialise the ShaderModule for off-mode.
 
 HRESULT BrokerClient::SetD3DManager(IUnknown* manager, UINT width, UINT height)
 {
@@ -276,11 +279,6 @@ HRESULT BrokerClient::SetD3DManager(IUnknown* manager, UINT width, UINT height)
     }
     RETURN_IF_FAILED(_dxgiManager->OpenDeviceHandle(&_deviceHandle));
 
-    // Initialise the "off mode" shader using the MF-provided device.
-    wil::com_ptr_nothrow<ID3D11Device> device;
-    RETURN_IF_FAILED(_dxgiManager->GetVideoService(_deviceHandle, IID_PPV_ARGS(&device)));
-    RETURN_IF_FAILED(_offModeShader.Initialize(device));
-
     return ReconfigureFormat(width, height);
 }
 
@@ -293,7 +291,7 @@ HRESULT BrokerClient::SetD3DManager(IUnknown* manager, UINT width, UINT height)
 //   1. Try to (re)connect to the broker.
 //   2a. Connected: wait on the GPU fence, copy the shared texture to our
 //       private texture, blit into the render target.
-//   2b. Not connected: render the ShaderModule off-mode animation.
+//   2b. Not connected: copy the static "NO SIGNAL" frame.
 //   3. Wrap the render target in an IMFSample (via a DXGI surface buffer).
 //   4. If the negotiated format is NV12, push the sample through VideoProcessorMFT
 //      and return the converted output sample.
@@ -340,9 +338,12 @@ HRESULT BrokerClient::Generate(IMFSample* sample, REFGUID format, IMFSample** ou
         context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->Draw(3, 0);  // 3 vertices, no index buffer — full-screen triangle
 
+    } else if (_noSignalTexture) {
+        // Broker not running — show the static "NO SIGNAL" frame.
+        context->CopyResource(_texture.get(), _noSignalTexture.get());
     } else {
-        // Broker not running — render the animated "off mode" placeholder.
-        _offModeShader.Render(_textureRTV, _width, _height);
+        const float black[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        context->ClearRenderTargetView(_textureRTV.get(), black);
     }
     context->Flush();
 

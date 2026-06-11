@@ -13,8 +13,8 @@
 //     All discovered producers are tiled evenly.
 //     (Currently stubbed — the grid tile layout is not yet implemented.)
 //
-// When no primary source is available, the ShaderModule "off mode" animated
-// placeholder is rendered instead of leaving the output blank.
+// When no primary source is available, a static black "NO SIGNAL" frame is
+// shown instead of leaving the output blank.
 //
 // All rendering uses D3D11 and the same full-screen triangle blit technique
 // as BrokerClient: a vertex shader generates three vertices from SV_VertexID,
@@ -62,13 +62,12 @@ HRESULT Multiplexer::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device)
     m_device->GetImmediateContext(&m_context);
     m_context.As(&m_context4);
     RETURN_IF_FAILED(CreateResources());
-    RETURN_IF_FAILED(m_offModeShader.Initialize(m_device));
     return S_OK;
 }
 
 void Multiplexer::Shutdown()
 {
-    m_offModeShader.Shutdown();
+    m_noSignalTexture.Reset();
     m_device.Reset();
     m_context.Reset();
     m_context4.Reset();
@@ -141,6 +140,9 @@ HRESULT Multiplexer::CreateResources()
     sampDesc.MinLOD         = 0;
     sampDesc.MaxLOD         = D3D11_FLOAT32_MAX;
     RETURN_IF_FAILED(m_device->CreateSamplerState(&sampDesc, &m_blitSampler));
+
+    // Static placeholder used as the background when no primary source is live.
+    RETURN_IF_FAILED(CreateNoSignalTexture(m_device.Get(), compositeDesc.Width, compositeDesc.Height, &m_noSignalTexture));
 
     return S_OK;
 }
@@ -215,10 +217,9 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
 // Steps:
 //   1. Sync GPU resources: open connections for new producers, drop stale ones,
 //      then for each producer wait on its fence and copy its texture locally.
-//   2. Clear the composite render target to solid blue (visible when no source
-//      is active and the off-mode shader is somehow skipped).
-//   3. Render background: either the primary source fullscreen, or the off-mode
-//      shader if no primary source is available.
+//   2. Clear the composite render target to black.
+//   3. Render background: either the primary source fullscreen, or the static
+//      "NO SIGNAL" frame if no primary source is available.
 //   4. Render overlays: PiP tiles (priority-list mode) or grid (grid mode).
 //   5. Finalise: copy composite to output texture and signal the output fence.
 
@@ -257,7 +258,7 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     // --- Step 2: Clear the composite render target ---
 
     m_context->OMSetRenderTargets(1, m_compositeRTV.GetAddressOf(), nullptr);
-    const float clearColor[] = { 0.0f, 0.0f, 1.0f, 1.0f };  // Saturated blue fallback
+    const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     m_context->ClearRenderTargetView(m_compositeRTV.Get(), clearColor);
 
     D3D11_TEXTURE2D_DESC compDesc;
@@ -289,9 +290,10 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         m_context->PSSetShaderResources(0, 1, primarySourceRes->privateSRV.GetAddressOf());
         m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         m_context->Draw(3, 0);
-    } else {
-        // No primary source — show the animated "off mode" placeholder.
-        m_offModeShader.Render(m_compositeRTV, MUX_WIDTH, MUX_HEIGHT);
+    } else if (m_noSignalTexture) {
+        // No primary source — show the static "NO SIGNAL" frame.
+        m_context->CopyResource(m_compositeTexture.Get(), m_noSignalTexture.Get());
+        m_context->OMSetRenderTargets(1, m_compositeRTV.GetAddressOf(), nullptr);
     }
 
     // --- Step 4: Render overlays ---

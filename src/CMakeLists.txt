@@ -45,11 +45,10 @@ set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 c
 # VirtuaCamCommon  --  static library shared by all other targets
 # =============================================================================
 add_library(VirtuaCamCommon STATIC
-    VirtuaCam/Tools.cpp         # String/GUID utilities, YUV conversion, registry helpers
+    VirtuaCam/Tools.cpp         # String/GUID utilities, YUV conversion, registry helpers, "No Signal" frame
     VirtuaCam/Guids.cpp         # COM GUID definitions (INITGUID must be defined here only)
     VirtuaCam/Formats.cpp       # Supported resolution + frame-rate combinations
     VirtuaCam/Discovery.cpp     # IPC: scans running processes for producer shared-memory manifests
-    VirtuaCam/ShaderModule.cpp  # "Off mode" HLSL shader (retro CRT, shown when no source is live)
 )
 # Guids.cpp must be compiled without the precompiled header because it
 # defines INITGUID, which must appear exactly once across the entire binary.

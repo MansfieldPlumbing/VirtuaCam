@@ -16,6 +16,12 @@ const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value);
 HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG ouputSize, LONG outputStride);
 HANDLE GetHandleFromName(const WCHAR* name);
 
+struct ID3D11Device;
+struct ID3D11Texture2D;
+// Creates a static BGRA8 placeholder texture: black frame with "NO SIGNAL"
+// rastered in the centre.  Shown whenever no producer is feeding the camera.
+HRESULT CreateNoSignalTexture(ID3D11Device* device, UINT width, UINT height, ID3D11Texture2D** outTexture);
+
 enum class VCamCommand;
 
 struct BroadcastManifest {

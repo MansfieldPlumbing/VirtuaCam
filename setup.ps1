@@ -356,7 +356,7 @@ function Invoke-Unblock {
 # ---------------------------------------------------------------------------
 function Invoke-Preflight {
     Write-Host ""
-    & "$ScriptsDir\setup_preflight.ps1" -ProjectRoot $ProjectRoot -ConfigFile $ConfigFile -Manifest $Manifest
+    & "$ScriptsDir\setup_preflight.ps1" -ProjectRoot $ProjectRoot -ConfigFile $ConfigFile
 }
 
 # ---------------------------------------------------------------------------

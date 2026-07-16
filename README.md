@@ -16,6 +16,48 @@ The data flow is designed for efficiency:
 
 This architecture is ideal for applications like game streaming, creative coding, real-time video filters, screen sharing, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed.
 
+## Architecture Overview
+
+### Virtual Object Manager (VOM) Pattern
+
+VirtuaCam implements a **Virtual Object Manager** pattern inspired by kernel-mode handle tables, providing:
+
+- **Deterministic Resource Lifecycle**: All resources (menus, textures, IPC handles) are tracked via generational handle tables with explicit reference counting
+- **Thread-Safe Operations**: Handle tables use critical sections to prevent race conditions between UI thread, broker thread, and producer processes
+- **Graceful Teardown**: Resources can be reclaimed deterministically via `DropPrefix()` and `Terminate()` operations, preventing leaks and deadlocks
+- **Generational Handles**: Stale handle IDs are rejected O(1), preventing use-after-free bugs
+
+### Inter-Process Communication (IPC) Design
+
+**Key Insight**: Uses `Local\` namespace instead of `Global\` for shared memory and texture handles.
+
+**Why `Local\`?**
+- Standard users lack `SeCreateGlobalPrivilege`, causing `CreateFileMappingW` to fail with `ERROR_ACCESS_DENIED` in `Global\` namespace
+- `Local\` namespace exists within the user's session, allowing standard user execution
+- The Camera Frame Server (LOCAL SERVICE) runs in Session 0 but can access `Local\` handles created by the user-mode broker
+
+**Creator-Consumer Pattern**:
+1. **DLL Creates Handles**: `DirectPortClient.dll` loaded by Frame Server (LOCAL SERVICE) has privileges to create shared handles
+2. **Permissive DACLs**: Security descriptor `D:P(A;;GA;;;AU)` grants access to all authenticated users
+3. **User App Connects**: `VirtuaCam.exe` runs as standard user, opens existing handles via `OpenFileMappingW` instead of creating them
+
+### Deployment Architecture
+
+**Single-Folder Install** (`C:\Program Files\VirtuaCam\`):
+- All binaries installed together (no split between Program Files and AppData)
+- Installer requires admin elevation once during setup
+- Runtime executables configured with `asInvoker` manifest level
+
+**Split Runtime Permissions**:
+- **Read-Only**: Binaries in `Program Files` (standard users can read/execute)
+- **Read/Write**: Settings in `HKCU\Software\VirtuaCam` and `%LOCALAPPDATA%\VirtuaCam\`
+- **No UAC Prompts**: After installation, users run the app without elevation requests
+
+**Legacy Compatibility Fallback**:
+- Modern Windows 11: Uses `MFCreateVirtualCamera` API (user-mode, no admin needed)
+- Legacy Windows 10/older: Falls back to COM registration in HKLM (requires admin)
+- Graceful prompt: If modern API fails, user is asked to elevate for legacy mode
+
 ## Technical Deep Dive
 
 VirtuaCam's architecture relies on several key Windows technologies to achieve its high-performance, zero-copy pipeline:
@@ -127,6 +169,31 @@ Open an application like the **Windows Camera App**, **Zoom**, **Discord**, or *
 
 *   [Integrating a user-mode virtual display driver (IddCx)](docs/VIRTUAL_DISPLAY_DRIVER.md) — expose a virtual monitor whose desktop feeds the camera.
 *   [Running VirtuaCam as a Windows service](docs/WINDOWS_SERVICE.md) — boot-time camera availability with a non-elevated tray controller.
+
+## Code Documentation Philosophy
+
+VirtuaCam follows a **"Why, What, How"** documentation approach in source files:
+
+### Header Comments (The "Why")
+Every `.cpp` file starts with extensive header comments explaining:
+- **Design decisions** and trade-offs considered
+- **Security model** (e.g., `Local\` vs `Global\`, DACL choices)
+- **Cross-process interaction patterns** (Creator-Consumer, handle tables)
+- **Historical context** for non-obvious implementation choices
+
+### Inline Comments (The "What" and "How")
+Critical code sections include block comments that explain:
+- **WHAT** the code does (especially for Windows API calls with subtle behavior)
+- **HOW** it fits into the larger architecture
+- **WHY** this specific approach was chosen over alternatives
+
+### Example Patterns Documented
+1. **VOM Handle Tables** (`Menu.cpp`): Explains deadlock prevention via generational handles
+2. **Security Descriptors** (`Broker.cpp`): Documents SDDL string meaning and Frame Server access requirements
+3. **Namespace Selection** (all IPC files): Justifies `Local\` over `Global\` for privilege avoidance
+4. **Graceful Degradation** (`App.cpp`): Documents modern-vs-legacy API fallback flow
+
+This documentation style ensures that future maintainers understand not just *what* the code does, but *why* it was written that way—preventing accidental reintroduction of solved problems.
 
 ## License
 

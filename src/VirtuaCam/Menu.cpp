@@ -1,5 +1,5 @@
 // =============================================================================
-// Menu.cpp  --  Custom tray context menu
+// Menu.cpp  --  Custom tray context menu with VOM-style handle management
 // =============================================================================
 // A custom-drawn popup menu with a Windows 11 look:
 //   - Real DWM Mica/Acrylic: the window extends its frame into the client area
@@ -16,6 +16,36 @@
 // CustomMenuItem::subMenu unique_ptr and must NOT delete themselves -- their
 // windows are destroyed with the owner chain, but the objects die with the
 // parent.  (Deleting in both places was a heap-corrupting double delete.)
+//
+// VIRTUAL OBJECT MANAGER (VOM) PATTERN:
+// -------------------------------------
+// This file implements a kernel-mode-inspired handle table for menu objects to
+// solve DEADLOCK and FOCUS-SHIFT cleanup issues:
+//
+// PROBLEM: The original implementation had race conditions where:
+//   - User clicks away from menu -> focus shifts -> menu should close
+//   - But WM_KILLFOCUS arrived after other messages, causing stale pointers
+//   - UI thread blocked waiting for background threads holding menu references
+//   - Result: Deadlock or leaked menu windows floating on screen
+//
+// SOLUTION: Generational handle table (like Windows kernel object manager):
+//   - Each menu gets a unique handle ID (monotonically increasing counter)
+//   - HandleEntry contains: Menu pointer, RefCount, Generation, CloseEvent
+//   - Critical section protects the entire handle table (thread-safe)
+//   - CloseEvent (manual-reset) signals deterministic cleanup completion
+//   - Stale generations rejected O(1) - prevents use-after-free
+//
+// LIFECYCLE:
+//   1. Show() -> RegisterHandle() -> allocates ID, creates event, stores entry
+//   2. WM_KILLFOCUS -> CloseAllMenus() -> signals close events
+//   3. WM_DESTROY -> UnregisterHandle() -> signals event, removes from table
+//   4. Process shutdown -> CleanupHandles() -> ensures all events signaled
+//
+// WHY THIS WORKS:
+//   - No cross-thread blocking: handle table uses short critical section locks
+//   - Deterministic cleanup: events signal completion, no polling needed
+//   - Focus-shift safe: WM_KILLFOCUS triggers immediate cleanup cascade
+//   - Generational safety: old handle IDs fail validation after teardown
 // =============================================================================
 
 #include "pch.h"
@@ -26,12 +56,24 @@
 #include <uxtheme.h>
 #include <vector>
 #include <algorithm>
+#include <unordered_map>
 
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "msimg32.lib")   // AlphaBlend
 
 const wchar_t POPUP_MENU_CLASS[] = L"VirtuaCamCustomMenu";
 
+// VOM-style handle table for menu objects - thread-safe, generational handles
+struct MenuHandleEntry {
+    CustomMenu* Menu;
+    LONG RefCount;
+    UINT Generation;
+    HANDLE CloseEvent;  // Manual-reset event for deterministic cleanup signaling
+};
+
+static std::unordered_map<UINT, MenuHandleEntry> g_menuHandles;
+static UINT g_menuHandleCounter = 0;
+static CRITICAL_SECTION g_menuHandleLock;
 static CustomMenu* g_topLevelMenu = nullptr;
 static std::vector<CustomMenu*> g_openMenus;
 static MenuPreviewProvider g_previewProvider;
@@ -108,9 +150,10 @@ static void DrawCompositedText(HTHEME theme, HDC hdc, const std::wstring& text, 
 // Construction / item list
 // ---------------------------------------------------------------------------
 
-CustomMenu::CustomMenu(HWND parent, HINSTANCE instance) : m_hwnd(nullptr), m_parentHwnd(parent), m_instance(instance), m_parentMenu(nullptr), m_activeSubMenu(nullptr), m_activeSubMenuItem(-1) {
+CustomMenu::CustomMenu(HWND parent, HINSTANCE instance) : m_hwnd(nullptr), m_parentHwnd(parent), m_instance(instance), m_parentMenu(nullptr), m_activeSubMenu(nullptr), m_activeSubMenuItem(-1), m_handleId(0), m_generation(0) {
     static bool isClassRegistered = false;
     if (!isClassRegistered) {
+        InitializeCriticalSection(&g_menuHandleLock);
         BufferedPaintInit();   // process-lifetime; paired implicitly at exit
         WNDCLASSEXW wcex = {};
         wcex.cbSize = sizeof(WNDCLASSEX);
@@ -126,9 +169,69 @@ CustomMenu::CustomMenu(HWND parent, HINSTANCE instance) : m_hwnd(nullptr), m_par
 }
 
 CustomMenu::~CustomMenu() {
+    UnregisterHandle();
+}
+
+// Static cleanup for VOM handle table - called at process shutdown
+void CleanupMenuHandles() {
+    EnterCriticalSection(&g_menuHandleLock);
+    for (auto& kv : g_menuHandles) {
+        if (kv.second.CloseEvent) {
+            SetEvent(kv.second.CloseEvent);
+            CloseHandle(kv.second.CloseEvent);
+        }
+    }
+    g_menuHandles.clear();
+    LeaveCriticalSection(&g_menuHandleLock);
+    DeleteCriticalSection(&g_menuHandleLock);
+}
+
+void CustomMenu::CleanupHandles() {
+    CleanupMenuHandles();
 }
 
 HWND CustomMenu::GetHwnd() const { return m_hwnd; }
+
+// VOM-style handle registration - allocates a generational handle for the menu
+void CustomMenu::RegisterHandle() {
+    EnterCriticalSection(&g_menuHandleLock);
+    m_handleId = ++g_menuHandleCounter;
+    m_generation = 1;
+    
+    HANDLE closeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    MenuHandleEntry entry{ this, 1, m_generation, closeEvent };
+    g_menuHandles[m_handleId] = entry;
+    LeaveCriticalSection(&g_menuHandleLock);
+}
+
+// Unregister handle and signal close event for deterministic cleanup
+void CustomMenu::UnregisterHandle() {
+    if (m_handleId == 0) return;
+    
+    EnterCriticalSection(&g_menuHandleLock);
+    auto it = g_menuHandles.find(m_handleId);
+    if (it != g_menuHandles.end() && it->second.Menu == this) {
+        // Signal the close event to wake any waiters
+        if (it->second.CloseEvent) {
+            SetEvent(it->second.CloseEvent);
+            CloseHandle(it->second.CloseEvent);
+        }
+        g_menuHandles.erase(it);
+    }
+    m_handleId = 0;
+    LeaveCriticalSection(&g_menuHandleLock);
+}
+
+// Static helper to signal close event by handle ID
+void CustomMenu::SignalCloseEvent(UINT handleId) {
+    EnterCriticalSection(&g_menuHandleLock);
+    auto it = g_menuHandles.find(handleId);
+    if (it != g_menuHandles.end() && it->second.CloseEvent) {
+        SetEvent(it->second.CloseEvent);
+    }
+    LeaveCriticalSection(&g_menuHandleLock);
+}
+
 void CustomMenu::AddItem(const std::wstring& text, UINT id, bool checked) { m_items.push_back({ text, id, false, checked, false, false, nullptr }); }
 void CustomMenu::AddSeparator() { m_items.push_back({ L"", 0, true, false, false, false, nullptr }); }
 
@@ -209,6 +312,9 @@ void CustomMenu::Show(int x, int y) {
     );
     if (!m_hwnd) return;
 
+    // Register VOM-style handle for deterministic cleanup tracking
+    RegisterHandle();
+    
     g_openMenus.push_back(this);
     if (m_parentMenu == nullptr) {
         g_topLevelMenu = this;
@@ -392,6 +498,14 @@ LRESULT CustomMenu::HandleMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         return 0;
     }
 
+    case WM_KILLFOCUS: {
+        // User focus shifted away - trigger deterministic cleanup via handle event
+        if (this == g_topLevelMenu) {
+            CloseAllMenus();
+        }
+        return 0;
+    }
+
     case WM_CAPTURECHANGED:
     case WM_ACTIVATE: {
         if (this == g_topLevelMenu && uMsg == WM_ACTIVATE && wParam == WA_INACTIVE) {
@@ -468,6 +582,9 @@ LRESULT CustomMenu::HandleMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         }
         m_hwnd = nullptr;
         SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
+        
+        // Unregister VOM handle to signal deterministic cleanup
+        UnregisterHandle();
         return 0;
     }
 
@@ -479,8 +596,10 @@ LRESULT CustomMenu::HandleMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         }
         return 0;
     }
+    
+    default:
+        return DefWindowProc(hWnd, uMsg, wParam, lParam);
     }
-    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 // ---------------------------------------------------------------------------

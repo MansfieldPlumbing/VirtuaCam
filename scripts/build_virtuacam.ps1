@@ -1,193 +1,173 @@
 #Requires -Version 7.5
 # scripts/build_virtuacam.ps1
-# CMake-based build for VirtuaCam.
-# Called by setup.ps1 with a $Paths object.
-# Can also be run standalone — will use config.ini / auto-detect.
+# Builds VirtuaCam using CMake and vcpkg.
+# Called by setup.ps1 - do not run directly.
 
 param(
-    [PSCustomObject]$Paths = $null
+    [PSCustomObject]$Paths
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ---------------------------------------------------------------------------
-# STANDALONE MODE
-# ---------------------------------------------------------------------------
-if (-not $Paths) {
-    $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
-    $ConfigFile  = "$ProjectRoot\config.ini"
-    $VcpkgRoot = $null
-    $CmakeExe  = 'cmake'
-
-    if (Test-Path $ConfigFile) {
-        Get-Content $ConfigFile | ForEach-Object {
-            if ($_ -match "^vcpkg_root=(.+)$")   { $VcpkgRoot = $Matches[1].Trim() }
-            if ($_ -match "^cmake_exe=(.+)$")   { $CmakeExe  = $Matches[1].Trim() }
-        }
-    }
-
-    # Auto-detect vcpkg if not in config
-    if (-not $VcpkgRoot) {
-        $probePaths = @(
-            $env:VCPKG_ROOT,
-            (Join-Path $env:LOCALAPPDATA "vcpkg"),
-            "C:\vcpkg",
-            (Join-Path $env:USERPROFILE "vcpkg")
-        ) | Where-Object { $_ }
-
-        foreach ($candidate in $probePaths) {
-            $toolchain = Join-Path $candidate "scripts\buildsystems\vcpkg.cmake"
-            if (Test-Path $toolchain) {
-                $VcpkgRoot = $candidate
-                break
-            }
-        }
-    }
-
-    $Paths = [PSCustomObject]@{
-        ProjectRoot = $ProjectRoot
-        ConfigFile  = $ConfigFile
-        VcpkgRoot   = $VcpkgRoot
-        CmakeExe    = $CmakeExe
-        SrcDir      = "$ProjectRoot\src"
-        BuildDir    = "$ProjectRoot\build"
-    }
-}
-
 $ProjectRoot = $Paths.ProjectRoot
-$VcpkgRoot   = $Paths.VcpkgRoot
-$CmakeExe    = $Paths.CmakeExe
-$SrcDir      = $Paths.SrcDir
 $BuildDir    = $Paths.BuildDir
+$SrcDir      = $Paths.SrcDir
+$CmakeExe    = $Paths.CmakeExe
+$VcpkgRoot   = $Paths.VcpkgRoot
+$ConfigFile  = $Paths.ConfigFile
 
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  VIRTUACAM  -  Build Script" -ForegroundColor Cyan
-Write-Host "════════════════════════════════════════════════════════════"
+Write-Host "================================================================================" -ForegroundColor Cyan
+Write-Host "  VIRTUACAM BUILD" -ForegroundColor Cyan
+Write-Host "================================================================================"
 
 # ---------------------------------------------------------------------------
-# [1] VALIDATE VCPKG
+# Load config to get vcvars path
 # ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "  [1/5] Validating vcpkg..." -ForegroundColor Yellow
-
-if (-not $VcpkgRoot -or -not (Test-Path $VcpkgRoot)) {
-    Write-Host ""
-    Write-Host "  ❌ vcpkg not found." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  Set VCPKG_ROOT environment variable or install vcpkg:" -ForegroundColor DarkYellow
-    Write-Host "    git clone https://github.com/microsoft/vcpkg.git" -ForegroundColor White
-    Write-Host "    cd vcpkg && .\bootstrap-vcpkg.bat" -ForegroundColor White
-    Write-Host ""
-    exit 1
-}
-
-$ToolchainFile = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
-if (-not (Test-Path $ToolchainFile)) {
-    Write-Host ""
-    Write-Host "  ❌ vcpkg toolchain not found at '$ToolchainFile'." -ForegroundColor Red
-    Write-Host "  Is your vcpkg installation complete?" -ForegroundColor DarkYellow
-    exit 1
-}
-
-Write-Host "  + vcpkg: $VcpkgRoot" -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# [2] PREPARE BUILD DIRECTORY
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "  [2/5] Preparing build directory..." -ForegroundColor Yellow
-
-if (-not (Test-Path $SrcDir)) {
-    Write-Host ""
-    Write-Host "  ❌ Source directory not found: $SrcDir" -ForegroundColor Red
-    exit 1
-}
-
-if (-not (Test-Path $BuildDir)) {
-    New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
-    Write-Host "  + Created build directory." -ForegroundColor Green
-} else {
-    Write-Host "  + Using existing build directory." -ForegroundColor DarkGray
-}
-
-# ---------------------------------------------------------------------------
-# [3] CMAKE CONFIGURE
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "  [3/5] Configuring with CMake..." -ForegroundColor Yellow
-
-$configArgs = @(
-    "-S", $SrcDir,
-    "-B", $BuildDir,
-    "-G", "Visual Studio 17 2022",
-    "-A", "x64",
-    "-DCMAKE_TOOLCHAIN_FILE=$ToolchainFile"
-)
-
-Write-Host "  Running: $CmakeExe $($configArgs -join ' ')" -ForegroundColor DarkGray
-& $CmakeExe $configArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Host ""
-    Write-Host "  ❌ CMake configuration failed." -ForegroundColor Red
-    exit 1
-}
-Write-Host "  + Configuration complete." -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# [4] CMAKE BUILD
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "  [4/5] Building (Release)..." -ForegroundColor Yellow
-
-$buildArgs = @("--build", $BuildDir, "--config", "Release")
-Write-Host "  Running: $CmakeExe $($buildArgs -join ' ')" -ForegroundColor DarkGray
-& $CmakeExe $buildArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Host ""
-    Write-Host "  ❌ Build failed." -ForegroundColor Red
-    exit 1
-}
-Write-Host "  + Build complete." -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# [5] COPY ARTIFACTS TO REPO ROOT
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "  [5/5] Copying artifacts..." -ForegroundColor Yellow
-
-$ArtifactDir = Join-Path $BuildDir "Release"
-if (-not (Test-Path $ArtifactDir)) {
-    Write-Host ""
-    Write-Host "  ❌ Expected artifacts at '$ArtifactDir' but directory not found." -ForegroundColor Red
-    exit 1
-}
-
-$copied = 0
-Get-ChildItem -Path $ArtifactDir -File |
-    Where-Object { $_.Extension -in ".exe", ".dll", ".pdb", ".pyd" } |
-    ForEach-Object {
-        Copy-Item -Path $_.FullName -Destination $ProjectRoot -Force
-        Write-Host "  + $($_.Name)" -ForegroundColor DarkGray
-        $copied++
+$vcvars = $null
+if (Test-Path $ConfigFile) {
+    Get-Content $ConfigFile | ForEach-Object {
+        if ($_ -match "^vcvars\s*=\s*(.+)$") { $vcvars = $Matches[1].Trim() }
     }
-
-if ($copied -eq 0) {
-    Write-Host "  ⚠  No .exe / .dll / .pdb files found in build output." -ForegroundColor DarkYellow
 }
 
 # ---------------------------------------------------------------------------
-# SUMMARY
+# Check for build tools
+# ---------------------------------------------------------------------------
+if (-not $vcvars -and -not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    Write-Host ""
+    Write-Host "  [!!] Visual Studio C++ environment not found." -ForegroundColor Red
+    Write-Host "       Run [2] Preflight checks first to detect your VS installation." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Find or use provided CMake
+# ---------------------------------------------------------------------------
+$cmakeToUse = $CmakeExe
+if (-not $cmakeToUse -or -not (Test-Path $cmakeToUse)) {
+    if (Get-Command cmake -ErrorAction SilentlyContinue) {
+        $cmakeToUse = (Get-Command cmake).Source
+    } else {
+        Write-Host ""
+        Write-Host "  [!!] CMake not found." -ForegroundColor Red
+        Write-Host "       Install CMake via winget or run [2] Preflight to detect it." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
+}
+
+Write-Host ""
+Write-Host "  Using CMake: $cmakeToUse" -ForegroundColor DarkGray
+if ($vcvars) {
+    Write-Host "  Using VC vars: $vcvars" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Using active developer environment (cl.exe in PATH)" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+# ---------------------------------------------------------------------------
+# Create build directory
+# ---------------------------------------------------------------------------
+if (-not (Test-Path $BuildDir)) {
+    New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+    Write-Host "  + Created build directory: $BuildDir" -ForegroundColor DarkGray
+}
+
+# ---------------------------------------------------------------------------
+# Build command
+# ---------------------------------------------------------------------------
+$vcpkgArg = ""
+if ($VcpkgRoot -and (Test-Path "$VcpkgRoot\vcpkg.exe")) {
+    $vcpkgArg = "-DCMAKE_TOOLCHAIN_FILE=`"$VcpkgRoot\scripts\buildsystems\vcpkg.cmake`""
+    Write-Host "  + Using vcpkg toolchain: $VcpkgRoot" -ForegroundColor DarkGray
+}
+
+Write-Host ""
+Write-Host "  Configuring with CMake..." -ForegroundColor Cyan
+
+$configCmd = "& `"$cmakeToUse`" -S `"$SrcDir`" -B `"$BuildDir`" -DCMAKE_BUILD_TYPE=Release $vcpkgArg"
+Write-Host "  $configCmd" -ForegroundColor DarkGray
+Write-Host ""
+
+Invoke-Expression $configCmd
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "  [!!] CMake configuration failed." -ForegroundColor Red
+    Write-Host "       Check errors above." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
+Write-Host ""
+Write-Host "  Building..." -ForegroundColor Cyan
+Write-Host ""
+
+$buildCmd = "& `"$cmakeToUse`" --build `"$BuildDir`" --config Release"
+Invoke-Expression $buildCmd
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "  [!!] Build failed." -ForegroundColor Red
+    Write-Host "       Check errors above." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Copy outputs to project root
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  BUILD SUCCEEDED" -ForegroundColor Green
-Write-Host "════════════════════════════════════════════════════════════"
+Write-Host "  Copying build outputs..." -ForegroundColor Cyan
+
+$exePath = "$BuildDir\Release\VirtuaCam.exe"
+if (Test-Path $exePath) {
+    Copy-Item $exePath -Destination $ProjectRoot -Force
+    Write-Host "  + VirtuaCam.exe" -ForegroundColor Green
+} else {
+    # Try without Release subdir (single-config generators)
+    $exePath = "$BuildDir\VirtuaCam.exe"
+    if (Test-Path $exePath) {
+        Copy-Item $exePath -Destination $ProjectRoot -Force
+        Write-Host "  + VirtuaCam.exe" -ForegroundColor Green
+    }
+}
+
+$brokerPath = "$BuildDir\Release\DirectPortBroker.dll"
+if (Test-Path $brokerPath) {
+    Copy-Item $brokerPath -Destination $ProjectRoot -Force
+    Write-Host "  + DirectPortBroker.dll" -ForegroundColor Green
+} else {
+    $brokerPath = "$BuildDir\DirectPortBroker.dll"
+    if (Test-Path $brokerPath) {
+        Copy-Item $brokerPath -Destination $ProjectRoot -Force
+        Write-Host "  + DirectPortBroker.dll" -ForegroundColor Green
+    }
+}
+
+$camPath = "$BuildDir\Release\DirectPortVirtuaCam.dll"
+if (Test-Path $camPath) {
+    Copy-Item $camPath -Destination $ProjectRoot -Force
+    Write-Host "  + DirectPortVirtuaCam.dll" -ForegroundColor Green
+} else {
+    $camPath = "$BuildDir\DirectPortVirtuaCam.dll"
+    if (Test-Path $camPath) {
+        Copy-Item $camPath -Destination $ProjectRoot -Force
+        Write-Host "  + DirectPortVirtuaCam.dll" -ForegroundColor Green
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  To register the virtual camera (requires Admin):" -ForegroundColor Cyan
-Write-Host "    .\build.ps1 -Register" -ForegroundColor White
+Write-Host "================================================================================" -ForegroundColor Green
+Write-Host "  BUILD SUCCESSFUL" -ForegroundColor Green
+Write-Host "================================================================================"
 Write-Host ""
-Write-Host "  To create an installer:" -ForegroundColor Cyan
-Write-Host "    Run [5] Create installer from the setup menu" -ForegroundColor White
+Write-Host "  Run the application:" -ForegroundColor Cyan
+Write-Host "    .\VirtuaCam.exe" -ForegroundColor White
 Write-Host ""

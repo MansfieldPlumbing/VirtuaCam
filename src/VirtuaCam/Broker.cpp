@@ -17,6 +17,26 @@
 //   4. Maintain a producer priority list supplied by the UI, which controls
 //      which producer is the primary (fullscreen) source and which appear as
 //      picture-in-picture overlays.
+//
+// KEY DESIGN DECISIONS:
+//
+// 1. Local\ Namespace (NOT Global\)
+//    - Standard users lack SeCreateGlobalPrivilege required for Global\ namespace
+//    - Local\ exists within the user session, avoiding ERROR_ACCESS_DENIED
+//    - Frame Server (LOCAL SERVICE) can still access Local\ handles via Creator-Consumer pattern
+//
+// 2. Permissive Security Descriptor: "D:P(A;;GA;;;AU)"
+//    - D:P = DACL present (no inheritance)
+//    - A = Allow
+//    - GA = GENERIC_ALL (full access)
+//    - AU = Authenticated Users (SID)
+//    This grants the Frame Server process permission to open handles created by
+//    the user-mode broker, even across session boundaries.
+//
+// 3. Creator-Consumer Pattern
+//    - Broker (user-mode) creates shared texture/fence with permissive DACL
+//    - DirectPortClient.dll loaded by Frame Server (LOCAL SERVICE) opens them
+//    - No admin privileges required for the main application executable
 // =============================================================================
 
 #define WIN32_LEAN_AND_MEAN
@@ -54,7 +74,7 @@ static std::unique_ptr<Multiplexer> g_multiplexer;
 
 // Name of the broker's own manifest — BrokerClient opens this to find the
 // shared output texture and fence.
-const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
+const WCHAR* BROKER_MANIFEST_NAME = L"Local\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 
 // Shared output resources (broker -> BrokerClient / virtual camera consumer)
 static ComPtr<ID3D11Texture2D> g_sharedTex_Out;
@@ -113,21 +133,41 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     g_device.As(&device5);
     RETURN_IF_FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(g_sharedFence_Out.GetAddressOf())));
 
-    // Security descriptor: "D:P(A;;GA;;;AU)"
-    //   D:P  = DACL (no inheritance)
-    //   A    = Allow
-    //   ;;GA = GENERIC_ALL
-    //   ;;;AU = Authenticated Users (SID)
-    // This grants the virtual camera DLL (which runs in a different user/session
-    // context under the Windows Frame Server) permission to open these handles.
+    // =============================================================================
+    // SECURITY DESCRIPTOR: "D:P(A;;GA;;;AU)"
+    // =============================================================================
+    // This is CRITICAL for cross-process access without admin privileges:
+    //   - D:P  = DACL present (no inheritance from parent)
+    //   - A    = Access Allowed ACE
+    //   - GA   = GENERIC_ALL (full access rights)
+    //   - AU   = Authenticated Users (built-in SID: S-1-5-11)
+    //
+    // WHY THIS MATTERS:
+    // The Windows Camera Frame Server runs as LOCAL SERVICE in Session 0.
+    // When DirectPortClient.dll is loaded by the Frame Server, it needs to open
+    // the shared texture and fence handles created by our user-mode broker.
+    // Without this permissive DACL, OpenSharedResource1 would fail with
+    // ERROR_ACCESS_DENIED when crossing session boundaries.
+    // =============================================================================
     wil::unique_hlocal_security_descriptor sd;
     PSECURITY_DESCRIPTOR sd_ptr = nullptr;
     THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
     sd.reset(sd_ptr);
     SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
 
-    const wchar_t* textureName = L"Global\\VirtuaCast_Broker_Texture";
-    const wchar_t* fenceName   = L"Global\\VirtuaCast_Broker_Fence";
+    // =============================================================================
+    // LOCAL\\ NAMESPACE (not Global\\)
+    // =============================================================================
+    // Using Local\\ instead of Global\\ is ESSENTIAL for standard user execution:
+    //   - Global\\ requires SeCreateGlobalPrivilege (admin-only by default)
+    //   - Local\\ exists within the user session, no special privileges needed
+    //   - Frame Server can still access these handles because:
+    //     a) Creator-Consumer pattern: DLL loaded by Frame Server opens handles
+    //     b) Permissive DACL above grants Authenticated Users full access
+    //     c) Local\\ handles are visible within the same logon session
+    // =============================================================================
+    const wchar_t* textureName = L"Local\\VirtuaCast_Broker_Texture";
+    const wchar_t* fenceName   = L"Local\\VirtuaCast_Broker_Fence";
 
     ComPtr<IDXGIResource1> r1;
     g_sharedTex_Out.As(&r1);

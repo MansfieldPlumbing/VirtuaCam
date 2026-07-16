@@ -12,6 +12,8 @@
 
 // Trim down the Windows.h surface area to reduce compile time.
 #define WIN32_LEAN_AND_MEAN
+// Keep windows.h from defining min/max macros that break std::min/std::max.
+#define NOMINMAX
 
 // ---------------------------------------------------------------------------
 // Debug heap  (debug builds only)
@@ -61,17 +63,6 @@
 #include <uuids.h>          // Media-type GUIDs (MFVideoFormat_RGB32, etc.)
 
 // ---------------------------------------------------------------------------
-// Windows Runtime (WinRT / C++/WinRT)
-// ---------------------------------------------------------------------------
-#include "winrt/base.h"                                             // Core WinRT (com_ptr, hstring, etc.)
-#include "winrt/Windows.ApplicationModel.h"                        // Package identity queries
-#include <winrt/Windows.Foundation.h>                              // IAsyncOperation, IClosable, etc.
-#include <winrt/Windows.Graphics.Capture.h>                        // GraphicsCaptureSession / Item
-#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>             // IDirect3DDevice (WinRT wrapper)
-#include <windows.graphics.capture.interop.h>                      // IGraphicsCaptureItemInterop (HWND -> CaptureItem)
-#include <windows.graphics.directx.direct3d11.interop.h>           // CreateDirect3D11DeviceFromDXGIDevice
-
-// ---------------------------------------------------------------------------
 // C++ Standard Library
 // ---------------------------------------------------------------------------
 #include <string>
@@ -105,51 +96,5 @@
 // ---------------------------------------------------------------------------
 #include "Resource.h"
 #include "Guids.h"
-
-// ---------------------------------------------------------------------------
-// Undocumented / internal Media Foundation interfaces
-// ---------------------------------------------------------------------------
-// Windows' Media Foundation frame-server queries the virtual camera source for
-// these interfaces via QueryInterface.  They are undocumented and not shipped
-// in any public SDK header; we declare them here with their known IIDs so that:
-//   1. Our QI implementation can return E_NOINTERFACE cleanly (rather than
-//      crashing on a missing vtable).
-//   2. The GUID resolver in Tools.cpp (GUID_ToStringW) can print a readable
-//      name instead of a raw {xxxxxxxx-...} string in debug traces.
-// None of these interfaces are implemented — they are declaration-only.
-DECLARE_INTERFACE_IID_(IMFDeviceController,      IUnknown, "A1F58958-A5AA-412F-AF20-1B7F1242DBA0") {};
-DECLARE_INTERFACE_IID_(IMFDeviceController2,     IUnknown, "2032C7EF-76F6-492A-94F3-4A81F69380CC") {};
-DECLARE_INTERFACE_IID_(IMFDeviceTransformManager,IUnknown, "70212999-c449-4b9d-b1a4-b358e1490121") {};
-DECLARE_INTERFACE_IID_(IMFDeviceSourceInternal,  IUnknown, "7F02A37E-4E81-11E0-8F3E-D057DFD72085") {};
-DECLARE_INTERFACE_IID_(IMFDeviceSourceInternal2, IUnknown, "c47d95d5-9685-4bf6-b6fb-772dc58d8e3b") {};
-DECLARE_INTERFACE_IID_(IMFDeviceSourceStatus,    IUnknown, "43937DC1-0BE6-4ADD-8A14-9EA68FF31252") {};
-DECLARE_INTERFACE_IID_(IUndocumented1,           IUnknown, "9A9DAAAA-9774-4732-848E-8739655F2BA3") {};
-
-// ---------------------------------------------------------------------------
-// WinRT QueryInterface hierarchy teaching
-// ---------------------------------------------------------------------------
-// C++/WinRT's com_ptr::as<T>() uses is_guid_of<T>() to verify interface IDs.
-// The MF interfaces form inheritance chains that WinRT doesn't know about by
-// default.  These specialisations teach it the correct base-interface lists so
-// that, for example, as<IMFMediaSource2>() will accept an IMFMediaSource QI hit.
-namespace winrt
-{
-    template<> inline bool is_guid_of<IMFMediaSourceEx>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaSourceEx, IMFMediaSource, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFMediaSource2>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaSource2, IMFMediaSourceEx, IMFMediaSource, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFMediaStream2>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaStream2, IMFMediaStream, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFActivate>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFActivate, IMFAttributes>(id);
-    }
-}
 
 #endif

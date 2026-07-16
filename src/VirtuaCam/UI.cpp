@@ -7,6 +7,7 @@
 #include "Discovery.h"
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#include <cstdint>
 #include <dwmapi.h>
 #include <map>
 
@@ -33,6 +34,8 @@ extern bool GetPipBlEnabled();
 extern void TogglePipTl();
 extern void TogglePipTr();
 extern void TogglePipBl();
+extern bool GetAutostartEnabled();
+extern void ToggleAutostart();
 
 struct EnumWindowsData { std::vector<CapturableWindow>* windows; };
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
@@ -95,6 +98,10 @@ static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
 
+// Staging texture for the in-menu preview thumbnail (lives on the broker's
+// device; recreated if the broker output size changes).
+static ComPtr<ID3D11Texture2D> g_menuPreviewStaging;
+
 static ComPtr<ID3D11Device> g_device;
 static ComPtr<ID3D11DeviceContext> g_context;
 static ComPtr<IDXGISwapChain> g_swapChain;
@@ -136,9 +143,61 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     return tex.Sample(smp, uv);
 })";
 
+// Copies the broker's current output frame to the CPU for the in-menu preview
+// thumbnail.  Runs on the UI thread (same thread that drives the broker's
+// render loop), so no synchronisation with the broker is needed.
+static bool GetBrokerPreviewFrame(std::vector<uint32_t>& bgra, UINT& width, UINT& height) {
+    if (!g_pfnGetSharedTexture) return false;
+    ID3D11Texture2D* tex = g_pfnGetSharedTexture();
+    if (!tex) return false;
+
+    ComPtr<ID3D11Device> device;
+    tex->GetDevice(&device);
+    ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(&context);
+
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDesc(&desc);
+
+    if (g_menuPreviewStaging) {
+        D3D11_TEXTURE2D_DESC stagingDesc;
+        g_menuPreviewStaging->GetDesc(&stagingDesc);
+        if (stagingDesc.Width != desc.Width || stagingDesc.Height != desc.Height)
+            g_menuPreviewStaging.Reset();
+    }
+    if (!g_menuPreviewStaging) {
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.MiscFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MipLevels = 1;
+        if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &g_menuPreviewStaging)))
+            return false;
+    }
+
+    context->CopyResource(g_menuPreviewStaging.Get(), tex);
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (FAILED(context->Map(g_menuPreviewStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return false;
+
+    width = desc.Width;
+    height = desc.Height;
+    bgra.resize((size_t)width * height);
+    for (UINT y = 0; y < height; y++) {
+        const uint32_t* src = (const uint32_t*)((const BYTE*)mapped.pData + (size_t)y * mapped.RowPitch);
+        uint32_t* dst = bgra.data() + (size_t)y * width;
+        for (UINT x = 0; x < width; x++)
+            dst[x] = src[x] | 0xFF000000u;   // force opaque alpha for GDI blits
+    }
+    context->Unmap(g_menuPreviewStaging.Get(), 0);
+    return true;
+}
+
 void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture) {
     g_instance = instance;
     g_pfnGetSharedTexture = pfnGetSharedTexture;
+    CustomMenu::SetPreviewProvider(GetBrokerPreviewFrame);
     LoadStringW(instance, IDC_VIRTUACAM, g_windowClass, MAX_LOADSTRING);
     MyRegisterClass(instance);
 
@@ -179,7 +238,9 @@ void UI_RunMessageLoop(std::function<void()> onIdle) {
 
 void UI_Shutdown() {
     AddTrayIcon(g_hMainWnd, false);
+    g_menuPreviewStaging.Reset();
     CleanupD3D();
+    CustomMenu::CleanupHandles();
 }
 
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices) {
@@ -295,6 +356,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
             else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
             else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
+            else if (id == ID_SETTINGS_AUTOSTART) ToggleAutostart();
             else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
             else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
             else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
@@ -427,7 +489,9 @@ void ShowContextMenu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
 
     auto menu = new CustomMenu(hwnd, g_instance);
-    menu->AddItem(L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
+    // Live thumbnail of the camera output; clicking it opens the full preview.
+    menu->AddPreviewItem(ID_TRAY_PREVIEW_WINDOW);
+    menu->AddItem(L"Open Preview Window", ID_TRAY_PREVIEW_WINDOW);
     menu->AddSeparator();
 
     BuildSourceSubMenu(menu->AddSubMenu(L"Source"), false);
@@ -463,6 +527,8 @@ void ShowContextMenu(HWND hwnd) {
         settingsMenu->AddItem(L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
         settingsMenu->AddItem(L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
         settingsMenu->AddItem(L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+        settingsMenu->AddSeparator();
+        settingsMenu->AddItem(L"Start with Windows", ID_SETTINGS_AUTOSTART, GetAutostartEnabled());
     }
 
     menu->AddItem(L"About", ID_TRAY_ABOUT);
@@ -493,6 +559,12 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
     {
         BOOL useDarkMode = TRUE;
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
+        // Match the tray menu: Mica backdrop (visible on the title bar) and
+        // rounded corners — DWM clips the swap chain to the rounded shape.
+        DWM_SYSTEMBACKDROP_TYPE backdropType = DWMSBT_MAINWINDOW;
+        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+        DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
         if (FAILED(InitD3D(hwnd)) || FAILED(LoadAssets())) {
             MessageBox(hwnd, L"Failed to initialize D3D for preview.", L"Error", MB_OK | MB_ICONERROR);
             return -1;
@@ -517,6 +589,9 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             if (FAILED(g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv))) return 0;
             if (g_hTelemetryLabel) SetWindowPos(g_hTelemetryLabel, NULL, 0, 0, width, 20, SWP_NOZORDER);
         }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) DestroyWindow(hwnd);
         break;
     case WM_CLOSE: DestroyWindow(hwnd); break;
     case WM_DESTROY: CleanupD3D(); g_hPreviewWnd = NULL; g_hTelemetryLabel = NULL; break;
@@ -547,6 +622,27 @@ void AddTrayIcon(HWND hwnd, bool add) {
     }
 }
 
+void UI_ShowTrayNotification(const std::wstring& title, const std::wstring& message) {
+    if (!g_hMainWnd) return;
+    NOTIFYICONDATA nid = { sizeof(nid) }; nid.hWnd = g_hMainWnd; nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_WARNING;
+    wcsncpy_s(nid.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, message.c_str(), _TRUNCATE);
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
+// Keeps the tray tooltip in sync with the broker state so the user can see
+// the connection status without opening the preview window.
+static void UpdateTrayTooltip(const wchar_t* status) {
+    if (!g_hMainWnd) return;
+    NOTIFYICONDATA nid = { sizeof(nid) }; nid.hWnd = g_hMainWnd; nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    std::wstring tip = std::wstring(L"VirtuaCam — ") + status;
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
 void CreatePreviewWindow() {
     if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
         ShowWindow(g_hPreviewWnd, SW_SHOW); SetForegroundWindow(g_hPreviewWnd); return;
@@ -558,15 +654,20 @@ void CreatePreviewWindow() {
 }
 
 void UpdateTelemetry(BrokerState currentState) {
-    if (!g_hTelemetryLabel) return;
     static BrokerState lastState = (BrokerState)-1;
-    if (currentState != lastState) {
-        lastState = currentState;
-        switch (currentState) {
-        case BrokerState::Searching: SetWindowText(g_hTelemetryLabel, L"Status: Searching for Producer..."); break;
-        case BrokerState::Connected: SetWindowText(g_hTelemetryLabel, L"Status: Connected to Producer"); break;
-        case BrokerState::Failed: SetWindowText(g_hTelemetryLabel, L"Status: Disconnected / No Producer Found"); break;
-        }
+    if (currentState == lastState) return;
+    lastState = currentState;
+
+    const wchar_t* status = L"";
+    switch (currentState) {
+    case BrokerState::Searching: status = L"Searching for Producer..."; break;
+    case BrokerState::Connected: status = L"Connected to Producer"; break;
+    case BrokerState::Failed: status = L"Disconnected / No Producer Found"; break;
+    }
+
+    UpdateTrayTooltip(status);
+    if (g_hTelemetryLabel) {
+        SetWindowText(g_hTelemetryLabel, (std::wstring(L"Status: ") + status).c_str());
     }
 }
 
@@ -611,7 +712,7 @@ void RenderPreviewFrame(HWND hwnd) {
         ComPtr<ID3D11Device1> device1;
         if (SUCCEEDED(g_device.As(&device1)))
         {
-            wil::unique_handle sharedHandle(GetHandleFromName(L"Global\\VirtuaCast_Broker_Texture"));
+            wil::unique_handle sharedHandle(GetHandleFromName(L"Local\\VirtuaCast_Broker_Texture"));
             if (sharedHandle)
             {
                 if (SUCCEEDED(device1->OpenSharedResource1(sharedHandle.get(), IID_PPV_ARGS(&g_uiSideTexture))))

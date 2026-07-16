@@ -3,21 +3,24 @@
 #include <d2d1_1.h>
 #include <ks.h>
 #include <cassert>
-#include "winrt/base.h"
 
 std::string to_string(const std::wstring& ws);
 std::wstring to_wstring(const std::string& s);
-const std::wstring GUID_ToStringW(const GUID& guid, bool resolve = true);
-const std::string GUID_ToStringA(const GUID& guid, bool resolve = true);
-const std::wstring PROPVARIANT_ToString(const PROPVARIANT& pv);
+const std::wstring GUID_ToStringW(const GUID& guid);
+const std::string GUID_ToStringA(const GUID& guid);
 void CenterWindow(HWND hwnd, bool useCursorPos);
 D2D_COLOR_F HSL2RGB(const float h, const float s, const float l);
-const std::wstring GetProcessName(DWORD pid);
 const LSTATUS RegWriteKey(HKEY key, PCWSTR path, HKEY* outKey);
 const LSTATUS RegWriteValue(HKEY key, PCWSTR name, const std::wstring& value);
 const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value);
 HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG ouputSize, LONG outputStride);
 HANDLE GetHandleFromName(const WCHAR* name);
+
+struct ID3D11Device;
+struct ID3D11Texture2D;
+// Creates a static BGRA8 placeholder texture: black frame with "NO SIGNAL"
+// rastered in the centre.  Shown whenever no producer is feeding the camera.
+HRESULT CreateNoSignalTexture(ID3D11Device* device, UINT width, UINT height, ID3D11Texture2D** outTexture);
 
 enum class VCamCommand;
 
@@ -31,9 +34,6 @@ struct BroadcastManifest {
     WCHAR fenceName[256];
     volatile VCamCommand command;
 };
-
-void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix);
-std::wstring PKSIDENTIFIER_ToString(PKSIDENTIFIER id, ULONG length);
 
 _Ret_range_(== , _expr)
 inline bool assert_true(bool _expr)
@@ -58,16 +58,3 @@ namespace wil
         return arr;
     }
 }
-
-struct registry_traits
-{
-    using type = HKEY;
-    static void close(type value) noexcept
-    {
-        WINRT_VERIFY_(ERROR_SUCCESS, RegCloseKey(value));
-    }
-    static constexpr type invalid() noexcept
-    {
-        return nullptr;
-    }
-};

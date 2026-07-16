@@ -100,6 +100,7 @@
 #define ID_SETTINGS_PIP_TL              18001   // Toggle PiP top-left visibility
 #define ID_SETTINGS_PIP_TR              18002   // Toggle PiP top-right visibility
 #define ID_SETTINGS_PIP_BL              18003   // Toggle PiP bottom-left visibility
+#define ID_SETTINGS_AUTOSTART           18004   // Toggle "Start with Windows"
 
 // =============================================================================
 // Enumerations
@@ -137,3 +138,8 @@ struct SourceState {
     HWND       hwnd        = nullptr;          // Target window handle (if mode == Window)
     int        cameraIndex = -1;               // Index into the camera enumeration list (if mode == Camera)
 };
+
+// Forward declarations from App.cpp
+void ShutdownSystem();
+bool IsRunningAsAdmin();
+void ElevateAndRelaunch();

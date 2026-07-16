@@ -143,8 +143,8 @@ extern "C" {
 
         DWORD pid = GetCurrentProcessId();
         std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-        std::wstring texName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-        std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+        std::wstring texName = L"Local\\DirectPortTexture_" + std::to_wstring(pid);
+        std::wstring fenceName = L"Local\\DirectPortFence_" + std::to_wstring(pid);
 
         wil::unique_hlocal_security_descriptor sd; PSECURITY_DESCRIPTOR sd_ptr = nullptr;
         THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));

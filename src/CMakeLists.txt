@@ -29,27 +29,26 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # --- External dependencies (via vcpkg) ---
 find_package(wil CONFIG REQUIRED)       # Windows Implementation Library: smart ptrs, HRESULT macros
-find_package(cppwinrt CONFIG REQUIRED)  # C++/WinRT: Windows Runtime projection
-set(VCAM_VCPKG_LIBS WIL::WIL Microsoft::CppWinRT)
+set(VCAM_VCPKG_LIBS WIL::WIL)
 
 # --- Windows SDK library groups ---
 # Media Foundation: virtual camera source, MFT format conversion, device enumeration
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
 # Direct3D / DXGI / D2D: GPU rendering, shared textures, fences
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
-# Core Windows: COM, shell, registry, audio, sync primitives
-set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids)
+# Core Windows: COM, shell, registry, audio, sync primitives.
+# runtimeobject provides RoGetActivationFactory/RoInitialize for the raw-ABI
+# Windows.Graphics.Capture access in DirectPortMFGraphicsCapture.
+set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi avrt strmiids)
 
 # =============================================================================
 # VirtuaCamCommon  --  static library shared by all other targets
 # =============================================================================
 add_library(VirtuaCamCommon STATIC
-    VirtuaCam/Tools.cpp         # String/GUID utilities, YUV conversion, registry helpers
+    VirtuaCam/Tools.cpp         # String/GUID utilities, YUV conversion, registry helpers, "No Signal" frame
     VirtuaCam/Guids.cpp         # COM GUID definitions (INITGUID must be defined here only)
-    VirtuaCam/Enumerator.cpp    # Human-readable name lookup tables for MF/KS constants
     VirtuaCam/Formats.cpp       # Supported resolution + frame-rate combinations
     VirtuaCam/Discovery.cpp     # IPC: scans running processes for producer shared-memory manifests
-    VirtuaCam/ShaderModule.cpp  # "Off mode" HLSL shader (retro CRT, shown when no source is live)
 )
 # Guids.cpp must be compiled without the precompiled header because it
 # defines INITGUID, which must appear exactly once across the entire binary.

@@ -21,5 +21,9 @@ void UI_Shutdown();
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices);
 void UI_SetAudioSelectionCallback(std::function<void(int)> callback);
 
+// Shows a transient balloon notification on the tray icon (used for
+// surfacing errors such as a producer process failing to launch).
+void UI_ShowTrayNotification(const std::wstring& title, const std::wstring& message);
+
 void CreatePreviewWindow();
 void UpdateTelemetry(BrokerState currentState);

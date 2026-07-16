@@ -1,3 +1,27 @@
+// =============================================================================
+// MFCamera.cpp  --  Physical webcam producer
+// =============================================================================
+// This producer DLL is loaded by VirtuaCamProcess.exe (--type camera).
+// It opens a physical webcam via the Media Foundation Source Reader, reads
+// raw RGB32 frames, uploads them to a shared D3D11 texture, and signals the
+// fence so the broker can composite the frame.
+//
+// Argument: --device <index>   (0-based index from MFEnumDeviceSources)
+//
+// Format negotiation
+// ------------------
+// The Source Reader is set up with MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING
+// so MF automatically inserts colour-space / format conversion.  We iterate
+// native media types until we find one we can force to RGB32 output, which
+// keeps the broker's compositing path simple (always BGRA/RGB32 input).
+//
+// Frame upload
+// ------------
+// Because MFSourceReader returns CPU-side buffers, frames are uploaded with
+// UpdateSubresource (CPU -> GPU copy).  This is the one place in VirtuaCam's
+// pipeline that does a CPU->GPU transfer; all other hops are GPU-only.
+// =============================================================================
+
 #include "pch.h"
 #include "MFCamera.h"
 #include <wrl.h>
@@ -87,12 +111,15 @@ extern "C" {
         RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
         RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
         
+        // Try each native type in turn: first set the reader to that native type
+        // so MF knows the camera's actual capabilities, then ask it to convert to
+        // RGB32.  Stop at the first combination that succeeds.
         for (DWORD i = 0; ; ++i) {
             ComPtr<IMFMediaType> nativeType;
             HRESULT hr = m_sourceReader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
             if (hr == MF_E_NO_MORE_TYPES) break;
             RETURN_IF_FAILED(hr);
-            
+
             if (SUCCEEDED(m_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get()))) {
                 if (SUCCEEDED(m_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
                     goto found_format;
@@ -116,8 +143,8 @@ extern "C" {
 
         DWORD pid = GetCurrentProcessId();
         std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-        std::wstring texName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-        std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+        std::wstring texName = L"Local\\DirectPortTexture_" + std::to_wstring(pid);
+        std::wstring fenceName = L"Local\\DirectPortFence_" + std::to_wstring(pid);
 
         wil::unique_hlocal_security_descriptor sd; PSECURITY_DESCRIPTOR sd_ptr = nullptr;
         THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
@@ -164,6 +191,7 @@ extern "C" {
 
         BYTE* pData = nullptr;
         DWORD cbCurrentLength = 0;
+        // CPU -> GPU upload.  Stride = width × 4 bytes (BGRA/RGB32).
         THROW_IF_FAILED(pBuffer->Lock(&pData, NULL, &cbCurrentLength));
         m_d3d11Context->UpdateSubresource(m_sharedD3D11Texture.Get(), 0, NULL, pData, m_videoWidth * 4, 0);
         THROW_IF_FAILED(pBuffer->Unlock());

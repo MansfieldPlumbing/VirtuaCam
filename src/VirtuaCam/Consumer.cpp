@@ -1,3 +1,25 @@
+// =============================================================================
+// Consumer.cpp  --  Example consumer / re-publisher producer
+// =============================================================================
+// This producer DLL is loaded by VirtuaCamProcess.exe (--type consumer).
+// It demonstrates the "loopback" capability of the VirtuaCam pipeline:
+//
+//   Broker output  -->  Consumer (shader transform)  -->  new producer manifest
+//
+// The consumer reads the broker's composed output texture (whatever is
+// currently showing on the virtual camera), applies a pixel shader
+// transformation, and publishes the result as its own producer manifest.
+// This re-published stream can then be selected as a source in VirtuaCam.
+//
+// Default pixel shader: passthrough (no visual change).  Replace g_pixelShader
+// with any HLSL transform to create custom video filters.
+//
+// Note: The consumer connects to the first stream returned by Discovery, which
+// in practice will be the broker's own output manifest (because the broker
+// advertises itself the same way as other producers).  If the broker is not
+// running, FindAndConnectInput() retries on the next ProcessFrame() call.
+// =============================================================================
+
 #include "pch.h"
 #include "Consumer.h"
 #include "Tools.h"
@@ -40,8 +62,10 @@ static BroadcastManifest*             g_pManifestViewOut = nullptr;
 static HANDLE                         g_sharedOutTextureHandle = nullptr;
 static HANDLE                         g_sharedOutFenceHandle = nullptr;
 
+// Full-screen triangle vertex shader (same pattern as BrokerClient/Multiplexer).
 const char* g_vertexShader = "struct VOut{float4 p:SV_POSITION;float2 u:TEXCOORD;};VOut main(uint v:SV_VertexID){VOut o;o.u=float2((v<<1)&2,v&2);o.p=float4(o.u.x*2-1,1-o.u.y*2,0,1);return o;}";
-const char* g_pixelShader = "Texture2D t:register(t0);SamplerState s:register(s0);float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD):SV_TARGET{float4 c=t.Sample(s,u);return float4(1-c.r,1-c.g,c.b,c.a);}";
+// Passthrough by default. Replace this shader to implement any custom video filter.
+const char* g_pixelShader = "Texture2D t:register(t0);SamplerState s:register(s0);float4 main(float4 p:SV_POSITION,float2 u:TEXCOORD):SV_TARGET{return t.Sample(s,u);}";
 
 HRESULT InitD3D()
 {
@@ -75,8 +99,8 @@ HRESULT InitOutputResources()
 
     DWORD pid = GetCurrentProcessId();
     std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-    std::wstring textureName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-    std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+    std::wstring textureName = L"Local\\DirectPortTexture_" + std::to_wstring(pid);
+    std::wstring fenceName = L"Local\\DirectPortFence_" + std::to_wstring(pid);
 
     ComPtr<IDXGIResource1> r1; g_sharedOutTexture.As(&r1);
     RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, textureName.c_str(), &g_sharedOutTextureHandle));

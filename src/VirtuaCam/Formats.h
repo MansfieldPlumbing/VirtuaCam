@@ -1,13 +1,27 @@
+// =============================================================================
+// Formats.h  --  Supported resolution and frame-rate tables
+// =============================================================================
+// These tables are used by the UI to populate the resolution/frame-rate menus.
+// They are NOT currently used to constrain the virtual camera's advertised
+// media types (MFStream.cpp hard-codes 1280×720 @ 30 fps); they exist for
+// future settings UI that would let the user configure the output resolution.
+//
+// Frame-rate numerator/denominator pairs follow Media Foundation convention:
+//   29.97 fps = 30000/1001  (NTSC drop-frame equivalent)
+// =============================================================================
+
 #pragma once
 #include <vector>
 #include <string>
 
+// A display resolution with a human-readable label.
 struct Resolution {
     UINT width;
     UINT height;
     const wchar_t* name;
 };
 
+// A frame rate expressed as a rational (numerator/denominator) with a label.
 struct FrameRate {
     UINT numerator;
     UINT denominator;

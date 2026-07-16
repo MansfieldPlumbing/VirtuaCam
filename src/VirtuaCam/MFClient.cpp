@@ -1,30 +1,118 @@
 #include "pch.h"
 #include "Tools.h"
-#include "Enumerator.h"
 #include "MFClient.h"
 #include "App.h"
 #include "Formats.h"
+#include <appmodel.h>
 
-HRESULT MFActivate::Initialize()
+// Live COM object / server-lock count for DllCanUnloadNow().
+std::atomic<long> g_moduleObjectCount{ 0 };
+
+// ---------------------------------------------------------------------------
+// IUnknown implementations
+// ---------------------------------------------------------------------------
+// Each class answers QueryInterface for the exact set of interfaces it
+// implements, including every base interface in the MF inheritance chains
+// (e.g. IMFMediaSource2 -> IMFMediaSourceEx -> IMFMediaSource ->
+// IMFMediaEventGenerator).  The Media Foundation frame server also probes for
+// several undocumented internal interfaces; they simply fall through to
+// E_NOINTERFACE here.
+
+STDMETHODIMP MFActivate::QueryInterface(REFIID riid, void** ppv)
 {
-	_source = winrt::make_self<MFSource>();
+	RETURN_HR_IF_NULL(E_POINTER, ppv);
+	*ppv = nullptr;
+	if (riid == __uuidof(IUnknown) || riid == __uuidof(IMFAttributes) || riid == __uuidof(IMFActivate))
+		*ppv = static_cast<IMFActivate*>(this);
+	else
+		return E_NOINTERFACE;
+	AddRef();
+	return S_OK;
+}
+
+STDMETHODIMP_(ULONG) MFActivate::AddRef() { return ++_refCount; }
+STDMETHODIMP_(ULONG) MFActivate::Release()
+{
+	auto count = --_refCount;
+	if (count == 0)
+		delete this;
+	return count;
+}
+
+STDMETHODIMP MFSource::QueryInterface(REFIID riid, void** ppv)
+{
+	RETURN_HR_IF_NULL(E_POINTER, ppv);
+	*ppv = nullptr;
+	if (riid == __uuidof(IUnknown) || riid == __uuidof(IMFMediaSource2) || riid == __uuidof(IMFMediaSourceEx) || riid == __uuidof(IMFMediaSource) || riid == __uuidof(IMFMediaEventGenerator))
+		*ppv = static_cast<IMFMediaSource2*>(this);
+	else if (riid == __uuidof(IMFAttributes))
+		*ppv = static_cast<IMFAttributes*>(this);
+	else if (riid == __uuidof(IMFGetService))
+		*ppv = static_cast<IMFGetService*>(this);
+	else if (riid == __uuidof(IKsControl))
+		*ppv = static_cast<IKsControl*>(this);
+	else if (riid == __uuidof(IMFSampleAllocatorControl))
+		*ppv = static_cast<IMFSampleAllocatorControl*>(this);
+	else
+		return E_NOINTERFACE;
+	AddRef();
+	return S_OK;
+}
+
+STDMETHODIMP_(ULONG) MFSource::AddRef() { return ++_refCount; }
+STDMETHODIMP_(ULONG) MFSource::Release()
+{
+	auto count = --_refCount;
+	if (count == 0)
+		delete this;
+	return count;
+}
+
+STDMETHODIMP MFStream::QueryInterface(REFIID riid, void** ppv)
+{
+	RETURN_HR_IF_NULL(E_POINTER, ppv);
+	*ppv = nullptr;
+	if (riid == __uuidof(IUnknown) || riid == __uuidof(IMFMediaStream2) || riid == __uuidof(IMFMediaStream) || riid == __uuidof(IMFMediaEventGenerator))
+		*ppv = static_cast<IMFMediaStream2*>(this);
+	else if (riid == __uuidof(IMFAttributes))
+		*ppv = static_cast<IMFAttributes*>(this);
+	else if (riid == __uuidof(IKsControl))
+		*ppv = static_cast<IKsControl*>(this);
+	else
+		return E_NOINTERFACE;
+	AddRef();
+	return S_OK;
+}
+
+STDMETHODIMP_(ULONG) MFStream::AddRef() { return ++_refCount; }
+STDMETHODIMP_(ULONG) MFStream::Release()
+{
+	auto count = --_refCount;
+	if (count == 0)
+		delete this;
+	return count;
+}
+
+// ---------------------------------------------------------------------------
+// MFActivate
+// ---------------------------------------------------------------------------
+
+HRESULT MFActivate::Initialize() try
+{
+	_source.attach(new MFSource());
 	RETURN_IF_FAILED(SetUINT32(MF_VIRTUALCAMERA_PROVIDE_ASSOCIATED_CAMERA_SOURCES, 1));
 	RETURN_IF_FAILED(SetGUID(MFT_TRANSFORM_CLSID_Attribute, CLSID_VCam));
 	RETURN_IF_FAILED(_source->Initialize(this));
 	return S_OK;
 }
+CATCH_RETURN()
 
 STDMETHODIMP MFActivate::ActivateObject(REFIID riid, void** ppv)
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppv);
 	*ppv = nullptr;
-
-	UINT32 pid = 0;
-	if (SUCCEEDED(GetUINT32(MF_FRAMESERVER_CLIENTCONTEXT_CLIENTPID, &pid)) && pid)
-	{
-		auto name = GetProcessName(pid);
-	}
-	RETURN_IF_FAILED_MSG(_source->QueryInterface(riid, ppv), "Activator::ActivateObject failed on IID %s", GUID_ToStringW(riid).c_str());
+	RETURN_HR_IF(MF_E_SHUTDOWN, !_source);
+	RETURN_IF_FAILED_MSG(_source->QueryInterface(riid, ppv), "Activator::ActivateObject failed on IID %ls", GUID_ToStringW(riid).c_str());
 	return S_OK;
 }
 
@@ -39,46 +127,21 @@ STDMETHODIMP MFActivate::DetachObject()
 	return S_OK;
 }
 
-MFSource::MFSource() : _streams(_numStreams)
+// ---------------------------------------------------------------------------
+// MFSource
+// ---------------------------------------------------------------------------
+
+MFSource::MFSource()
 {
+    g_moduleObjectCount++;
     SetBaseAttributesTraceName(L"MediaSourceAtts");
+    _streams.resize(_numStreams);
     for (auto i = 0; i < _numStreams; i++)
     {
-        auto stream = winrt::make_self<MFStream>();
-        stream->Initialize(this, i);
-        _streams[i].attach(stream.detach());
+        _streams[i].attach(new MFStream());
+        _streams[i]->Initialize(this, i);
     }
 }
-
-#if _DEBUG
-int32_t MFActivate::query_interface_tearoff(winrt::guid const& id, void** object) const noexcept
-{
-    if (id == winrt::guid_of<IMFAttributes>())
-    {
-        this->m_inner->AddRef();
-        *object = (IMFAttributes*)this;
-        return S_OK;
-    }
-
-    RETURN_HR_MSG(E_NOINTERFACE, "Activator QueryInterface failed on IID %s", GUID_ToStringW(id).c_str());
-}
-
-int32_t MFSource::query_interface_tearoff(winrt::guid const& id, void** object) const noexcept
-{
-    if (id == winrt::guid_of<IMFDeviceSourceInternal>() ||
-        id == winrt::guid_of<IMFDeviceSourceInternal2>() ||
-        id == winrt::guid_of<IMFDeviceTransformManager>() ||
-        id == winrt::guid_of<IMFCollection>() ||
-        id == winrt::guid_of<IMFDeviceController2>() ||
-        id == winrt::guid_of<IMFDeviceSourceStatus>())
-        return E_NOINTERFACE;
-
-    if (id == winrt::guid_of<IMFRealTimeClientEx>())
-        return E_NOINTERFACE;
-
-    RETURN_HR_MSG(E_NOINTERFACE, "MediaSource QueryInterface failed on IID %s", GUID_ToStringW(id).c_str());
-}
-#endif
 
 HRESULT MFSource::Initialize(IMFAttributes* attributes)
 {
@@ -109,15 +172,19 @@ HRESULT MFSource::Initialize(IMFAttributes* attributes)
 
 	RETURN_IF_FAILED(SetUnknown(MF_DEVICEMFT_SENSORPROFILE_COLLECTION, collection.get()));
 
-	try
+	// If the hosting process has package identity, advertise its family name as
+	// the camera's configuration app.  Plain Win32 hosts (the usual case) get
+	// APPMODEL_ERROR_NO_PACKAGE here, which we ignore.
+	UINT32 pfnLength = 0;
+	if (GetCurrentPackageFamilyName(&pfnLength, nullptr) == ERROR_INSUFFICIENT_BUFFER && pfnLength > 0)
 	{
-		auto appInfo = winrt::Windows::ApplicationModel::AppInfo::Current();
-		if (appInfo)
+		std::wstring packageFamilyName(pfnLength, L'\0');
+		if (GetCurrentPackageFamilyName(&pfnLength, packageFamilyName.data()) == ERROR_SUCCESS)
 		{
-			RETURN_IF_FAILED(SetString(MF_VIRTUALCAMERA_CONFIGURATION_APP_PACKAGE_FAMILY_NAME, appInfo.PackageFamilyName().data()));
+			packageFamilyName.resize(pfnLength > 0 ? pfnLength - 1 : 0);
+			RETURN_IF_FAILED(SetString(MF_VIRTUALCAMERA_CONFIGURATION_APP_PACKAGE_FAMILY_NAME, packageFamilyName.c_str()));
 		}
 	}
-	catch (...) {}
 
 	auto streams = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFStreamDescriptor>>(_streams.size());
 	for (uint32_t i = 0; i < streams.size(); i++)
@@ -151,7 +218,7 @@ int MFSource::GetStreamIndexById(DWORD id)
 
 STDMETHODIMP MFSource::BeginGetEvent(IMFAsyncCallback* pCallback, IUnknown* punkState)
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->BeginGetEvent(pCallback, punkState));
 	return S_OK;
@@ -161,7 +228,7 @@ STDMETHODIMP MFSource::EndGetEvent(IMFAsyncResult* pResult, IMFMediaEvent** ppEv
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppEvent);
 	*ppEvent = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->EndGetEvent(pResult, ppEvent));
 	return S_OK;
@@ -171,7 +238,7 @@ STDMETHODIMP MFSource::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent)
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppEvent);
 	*ppEvent = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->GetEvent(dwFlags, ppEvent));
 	return S_OK;
@@ -179,7 +246,7 @@ STDMETHODIMP MFSource::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent)
 
 STDMETHODIMP MFSource::QueueEvent(MediaEventType met, REFGUID guidExtendedType, HRESULT hrStatus, const PROPVARIANT* pvValue)
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(met, guidExtendedType, hrStatus, pvValue));
 	return S_OK;
@@ -189,7 +256,7 @@ STDMETHODIMP MFSource::CreatePresentationDescriptor(IMFPresentationDescriptor** 
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppPresentationDescriptor);
 	*ppPresentationDescriptor = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_descriptor);
 	RETURN_IF_FAILED(_descriptor->Clone(ppPresentationDescriptor));
 	return S_OK;
@@ -209,7 +276,7 @@ STDMETHODIMP MFSource::Pause()
 
 STDMETHODIMP MFSource::Shutdown()
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	LOG_IF_FAILED_MSG(_queue->Shutdown(), "Queue shutdown failed");
 	_queue.reset();
@@ -227,7 +294,7 @@ STDMETHODIMP MFSource::Start(IMFPresentationDescriptor* pPresentationDescriptor,
 	RETURN_HR_IF_NULL(E_POINTER, pPresentationDescriptor);
 	RETURN_HR_IF_NULL(E_POINTER, pvarStartPosition);
 	RETURN_HR_IF_MSG(E_INVALIDARG, pguidTimeFormat && *pguidTimeFormat != GUID_NULL, "Unsupported guid time format");
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_descriptor);
 
 	DWORD count;
@@ -271,7 +338,7 @@ STDMETHODIMP MFSource::Start(IMFPresentationDescriptor* pPresentationDescriptor,
 				RETURN_IF_FAILED(_descriptor->SelectStream(index));
 
 				wil::com_ptr_nothrow<IUnknown> unk;
-				RETURN_IF_FAILED(_streams[index].copy_to(&unk));
+				RETURN_IF_FAILED(_streams[index]->QueryInterface(IID_PPV_ARGS(&unk)));
 				RETURN_IF_FAILED(_queue->QueueEventParamUnk(MENewStream, GUID_NULL, S_OK, unk.get()));
 
 				wil::com_ptr_nothrow<IMFMediaTypeHandler> handler;
@@ -294,7 +361,7 @@ STDMETHODIMP MFSource::Start(IMFPresentationDescriptor* pPresentationDescriptor,
 
 STDMETHODIMP MFSource::Stop()
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_descriptor);
 	wil::unique_prop_variant time;
 	RETURN_IF_FAILED(InitPropVariantFromInt64(MFGetSystemTime(), &time));
@@ -310,7 +377,7 @@ STDMETHODIMP MFSource::Stop()
 STDMETHODIMP MFSource::GetSourceAttributes(IMFAttributes** ppAttributes)
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppAttributes);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_IF_FAILED(QueryInterface(IID_PPV_ARGS(ppAttributes)));
 	return S_OK;
 }
@@ -318,7 +385,7 @@ STDMETHODIMP MFSource::GetSourceAttributes(IMFAttributes** ppAttributes)
 STDMETHODIMP MFSource::SetMediaType(DWORD dwStreamID, IMFMediaType* pMediaType)
 {
 	RETURN_HR_IF_NULL(E_POINTER, pMediaType);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	return S_OK;
 }
 
@@ -326,16 +393,16 @@ STDMETHODIMP MFSource::GetStreamAttributes(DWORD dwStreamIdentifier, IMFAttribut
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppAttributes);
 	*ppAttributes = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF_MSG(E_FAIL, dwStreamIdentifier >= _streams.size(), "dwStreamIdentifier %u is invalid", dwStreamIdentifier);
-	RETURN_IF_FAILED(_streams[dwStreamIdentifier].copy_to(ppAttributes));
+	RETURN_IF_FAILED(_streams[dwStreamIdentifier]->QueryInterface(IID_PPV_ARGS(ppAttributes)));
 	return S_OK;
 }
 
 STDMETHODIMP MFSource::SetD3DManager(IUnknown* pManager)
 {
 	RETURN_HR_IF_NULL(E_POINTER, pManager);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	for (DWORD i = 0; i < _streams.size(); i++)
 	{
 		RETURN_IF_FAILED(_streams[i]->SetD3DManager(pManager));
@@ -345,15 +412,13 @@ STDMETHODIMP MFSource::SetD3DManager(IUnknown* pManager)
 
 STDMETHODIMP MFSource::GetService(REFGUID siid, REFIID iid, LPVOID* ppvObject)
 {
-	if (iid == __uuidof(IMFDeviceController) || iid == __uuidof(IMFDeviceController2))
-		return MF_E_UNSUPPORTED_SERVICE;
-	RETURN_HR(MF_E_UNSUPPORTED_SERVICE);
+	return MF_E_UNSUPPORTED_SERVICE;
 }
 
 STDMETHODIMP MFSource::SetDefaultAllocator(DWORD dwOutputStreamID, IUnknown* pAllocator)
 {
 	RETURN_HR_IF_NULL(E_POINTER, pAllocator);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	auto index = GetStreamIndexById(dwOutputStreamID);
 	RETURN_HR_IF(E_FAIL, index < 0);
 	RETURN_HR_IF_MSG(E_FAIL, index < 0 || (DWORD)index >= _streams.size(), "dwOutputStreamID %u is invalid, index:%i", dwOutputStreamID, index);
@@ -364,7 +429,7 @@ STDMETHODIMP MFSource::GetAllocatorUsage(DWORD dwOutputStreamID, DWORD* pdwInput
 {
 	RETURN_HR_IF_NULL(E_POINTER, peUsage);
 	RETURN_HR_IF_NULL(E_POINTER, pdwInputStreamID);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	auto index = GetStreamIndexById(dwOutputStreamID);
 	RETURN_HR_IF(E_FAIL, index < 0);
 	RETURN_HR_IF_MSG(E_FAIL, index < 0 || (DWORD)index >= _streams.size(), "dwOutputStreamID %u is invalid, index:%i", dwOutputStreamID, index);
@@ -377,7 +442,7 @@ STDMETHODIMP_(NTSTATUS) MFSource::KsProperty(PKSPROPERTY property, ULONG length,
 {
 	RETURN_HR_IF_NULL(E_POINTER, property);
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
@@ -385,14 +450,14 @@ STDMETHODIMP_(NTSTATUS) MFSource::KsMethod(PKSMETHOD method, ULONG length, LPVOI
 {
 	RETURN_HR_IF_NULL(E_POINTER, method);
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
 STDMETHODIMP_(NTSTATUS) MFSource::KsEvent(PKSEVENT evt, ULONG length, LPVOID data, ULONG dataLength, ULONG* bytesReturned)
 {
 	RETURN_HR_IF_NULL(E_POINTER, bytesReturned);
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
 }
 
@@ -543,7 +608,7 @@ void MFStream::Shutdown()
 
 STDMETHODIMP MFStream::BeginGetEvent(IMFAsyncCallback* pCallback, IUnknown* punkState)
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->BeginGetEvent(pCallback, punkState));
 	return S_OK;
@@ -553,7 +618,7 @@ STDMETHODIMP MFStream::EndGetEvent(IMFAsyncResult* pResult, IMFMediaEvent** ppEv
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppEvent);
 	*ppEvent = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->EndGetEvent(pResult, ppEvent));
 	return S_OK;
@@ -563,7 +628,7 @@ STDMETHODIMP MFStream::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent)
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppEvent);
 	*ppEvent = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->GetEvent(dwFlags, ppEvent));
 	return S_OK;
@@ -571,7 +636,7 @@ STDMETHODIMP MFStream::GetEvent(DWORD dwFlags, IMFMediaEvent** ppEvent)
 
 STDMETHODIMP MFStream::QueueEvent(MediaEventType met, REFGUID guidExtendedType, HRESULT hrStatus, const PROPVARIANT* pvValue)
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(met, guidExtendedType, hrStatus, pvValue));
 	return S_OK;
@@ -590,7 +655,7 @@ STDMETHODIMP MFStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamDescrip
 {
 	RETURN_HR_IF_NULL(E_POINTER, ppStreamDescriptor);
 	*ppStreamDescriptor = nullptr;
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_descriptor);
 	RETURN_IF_FAILED(_descriptor.copy_to(ppStreamDescriptor));
 	return S_OK;
@@ -598,7 +663,7 @@ STDMETHODIMP MFStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamDescrip
 
 STDMETHODIMP MFStream::RequestSample(IUnknown* pToken)
 {
-	winrt::slim_lock_guard lock(_lock);
+	auto lock = _lock.lock_exclusive();
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
 
 	wil::com_ptr_nothrow<IMFSample> sample;
@@ -690,35 +755,66 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 	return TRUE;
 }
 
-struct ClassFactory : winrt::implements<ClassFactory, IClassFactory>
+struct ClassFactory final : IClassFactory
 {
-	STDMETHODIMP CreateInstance(IUnknown* outer, GUID const& riid, void** result) noexcept final
+	ClassFactory() { g_moduleObjectCount++; }
+	virtual ~ClassFactory() { g_moduleObjectCount--; }
+
+	STDMETHODIMP QueryInterface(REFIID riid, void** ppv)
+	{
+		RETURN_HR_IF_NULL(E_POINTER, ppv);
+		*ppv = nullptr;
+		if (riid == __uuidof(IUnknown) || riid == __uuidof(IClassFactory))
+			*ppv = static_cast<IClassFactory*>(this);
+		else
+			return E_NOINTERFACE;
+		AddRef();
+		return S_OK;
+	}
+
+	STDMETHODIMP_(ULONG) AddRef() { return ++_refCount; }
+	STDMETHODIMP_(ULONG) Release()
+	{
+		auto count = --_refCount;
+		if (count == 0)
+			delete this;
+		return count;
+	}
+
+	STDMETHODIMP CreateInstance(IUnknown* outer, REFIID riid, void** result) noexcept
 	{
 		RETURN_HR_IF_NULL(E_POINTER, result);
 		*result = nullptr;
 		if (outer)
 			RETURN_HR(CLASS_E_NOAGGREGATION);
 
-		auto vcam = winrt::make_self<MFActivate>();
+		wil::com_ptr_nothrow<MFActivate> vcam;
+		try
+		{
+			vcam.attach(new MFActivate());
+		}
+		CATCH_RETURN();
 		RETURN_IF_FAILED(vcam->Initialize());
 		return vcam->QueryInterface(riid, result);
 	}
 
-	STDMETHODIMP LockServer(BOOL) noexcept final
+	STDMETHODIMP LockServer(BOOL lock) noexcept
 	{
+		if (lock)
+			g_moduleObjectCount++;
+		else
+			g_moduleObjectCount--;
 		return S_OK;
 	}
+
+private:
+	std::atomic<ULONG> _refCount{ 1 };
 };
 
 __control_entrypoint(DllExport)
 STDAPI DllCanUnloadNow()
 {
-	if (winrt::get_module_lock())
-	{
-		return S_FALSE;
-	}
-	winrt::clear_factory_cache();
-	return S_OK;
+	return g_moduleObjectCount.load() == 0 ? S_OK : S_FALSE;
 }
 
 _Check_return_
@@ -728,23 +824,26 @@ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Outptr_ LPVOID
 	*ppv = nullptr;
 
 	if (IsEqualGUID(rclsid, CLSID_VCam))
-		return winrt::make_self<ClassFactory>()->QueryInterface(riid, ppv);
+	{
+		wil::com_ptr_nothrow<ClassFactory> factory;
+		factory.attach(new (std::nothrow) ClassFactory());
+		RETURN_IF_NULL_ALLOC(factory);
+		return factory->QueryInterface(riid, ppv);
+	}
 
-	RETURN_HR(E_NOINTERFACE);
+	RETURN_HR(CLASS_E_CLASSNOTAVAILABLE);
 }
-
-using registry_key = winrt::handle_type<registry_traits>;
 
 STDAPI DllRegisterServer()
 {
     HMODULE hModule = NULL;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)DllRegisterServer, &hModule);
-	
+
     std::wstring exePath = wil::GetModuleFileNameW(hModule).get();
-	auto clsid = GUID_ToStringW(CLSID_VCam, false);
+	auto clsid = GUID_ToStringW(CLSID_VCam);
 	std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") + clsid + L"\\InprocServer32";
 
-	registry_key key;
+	wil::unique_hkey key;
 	RETURN_IF_WIN32_ERROR(RegWriteKey(HKEY_LOCAL_MACHINE, path.c_str(), key.put()));
 	RETURN_IF_WIN32_ERROR(RegWriteValue(key.get(), nullptr, exePath));
 	RETURN_IF_WIN32_ERROR(RegWriteValue(key.get(), L"ThreadingModel", L"Both"));
@@ -753,7 +852,7 @@ STDAPI DllRegisterServer()
 
 STDAPI DllUnregisterServer()
 {
-	auto clsid = GUID_ToStringW(CLSID_VCam, false);
+	auto clsid = GUID_ToStringW(CLSID_VCam);
 	std::wstring path = std::wstring(L"Software\\Classes\\CLSID\\") + clsid;
 	RETURN_IF_WIN32_ERROR(RegDeleteTree(HKEY_LOCAL_MACHINE, path.c_str()));
 	return S_OK;

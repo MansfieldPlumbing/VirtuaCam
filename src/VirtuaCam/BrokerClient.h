@@ -4,7 +4,6 @@
 #include <DirectXMath.h>
 #include "Tools.h"
 #include "App.h"
-#include "ShaderModule.h" // <-- RE-INTRODUCED
 
 struct ProducerConnection
 {
@@ -34,7 +33,7 @@ class BrokerClient
     wil::com_ptr_nothrow<ID3D11VertexShader> _blitVS;
     wil::com_ptr_nothrow<ID3D11PixelShader> _blitPS;
     wil::com_ptr_nothrow<ID3D11SamplerState> _blitSampler;
-    ShaderModule _offModeShader; // <-- RE-INTRODUCED
+    wil::com_ptr_nothrow<ID3D11Texture2D> _noSignalTexture;  // Static "NO SIGNAL" frame shown when the broker is absent
 
 private:
     HRESULT FindAndConnectToBroker();

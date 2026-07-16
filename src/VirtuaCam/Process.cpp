@@ -1,3 +1,24 @@
+// =============================================================================
+// Process.cpp  --  Producer process entry point
+// =============================================================================
+// VirtuaCamProcess.exe is a thin host that loads one producer DLL and runs its
+// frame loop.  The main app (VirtuaCam.exe) spawns one instance per active source.
+//
+// Command-line syntax:
+//   VirtuaCamProcess.exe --type <camera|capture|consumer> [extra args]
+//
+// Producer-specific args passed verbatim to InitializeProducer():
+//   camera:   --device <index>          (0-based camera index from enumeration)
+//   capture:  --hwnd <handle-as-uint64> (target window HWND)
+//   consumer: (no extra args)
+//
+// Frame loop design:
+//   Cooperative Win32 message loop — when no message is pending, calls
+//   module.Process() then sleeps 1 ms.  Each producer only does GPU work
+//   when a new source frame is actually available, so ~1000 polls/sec is
+//   plenty of headroom for 30-120 fps without burning a full CPU core.
+// =============================================================================
+
 #include "pch.h"
 #include "Process.h"
 #include "Resource.h"
@@ -32,6 +53,7 @@ bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& ar
     return !type.empty();
 }
 
+// Map --type string to a DLL filename, then resolve the three exported symbols.
 void LoadProducerModule(const std::wstring& type, ProducerModule& module)
 {
     std::wstring dllName;
@@ -74,6 +96,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         return 3;
     }
     
+    // Cooperative frame loop: drain Windows messages first, then call the
+    // producer's ProcessFrame().  Sleep(1) yields the thread for ~1 ms so we
+    // don't spin a full CPU core while waiting for the next camera/capture frame.
     MSG msg = {};
     while (msg.message != WM_QUIT)
     {
@@ -85,7 +110,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         else
         {
             module.Process();
-            Sleep(1); 
+            Sleep(1);
         }
     }
 

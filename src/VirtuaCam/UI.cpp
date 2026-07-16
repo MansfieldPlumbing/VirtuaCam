@@ -240,6 +240,7 @@ void UI_Shutdown() {
     AddTrayIcon(g_hMainWnd, false);
     g_menuPreviewStaging.Reset();
     CleanupD3D();
+    CustomMenu::CleanupHandles();
 }
 
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices) {
@@ -711,7 +712,7 @@ void RenderPreviewFrame(HWND hwnd) {
         ComPtr<ID3D11Device1> device1;
         if (SUCCEEDED(g_device.As(&device1)))
         {
-            wil::unique_handle sharedHandle(GetHandleFromName(L"Global\\VirtuaCast_Broker_Texture"));
+            wil::unique_handle sharedHandle(GetHandleFromName(L"Local\\VirtuaCast_Broker_Texture"));
             if (sharedHandle)
             {
                 if (SUCCEEDED(device1->OpenSharedResource1(sharedHandle.get(), IID_PPV_ARGS(&g_uiSideTexture))))

@@ -54,7 +54,7 @@ static std::unique_ptr<Multiplexer> g_multiplexer;
 
 // Name of the broker's own manifest — BrokerClient opens this to find the
 // shared output texture and fence.
-const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
+const WCHAR* BROKER_MANIFEST_NAME = L"Local\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 
 // Shared output resources (broker -> BrokerClient / virtual camera consumer)
 static ComPtr<ID3D11Texture2D> g_sharedTex_Out;
@@ -126,8 +126,8 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     sd.reset(sd_ptr);
     SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
 
-    const wchar_t* textureName = L"Global\\VirtuaCast_Broker_Texture";
-    const wchar_t* fenceName   = L"Global\\VirtuaCast_Broker_Fence";
+    const wchar_t* textureName = L"Local\\VirtuaCast_Broker_Texture";
+    const wchar_t* fenceName   = L"Local\\VirtuaCast_Broker_Fence";
 
     ComPtr<IDXGIResource1> r1;
     g_sharedTex_Out.As(&r1);

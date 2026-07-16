@@ -28,7 +28,7 @@
 using namespace DirectX;
 
 // Name of the broker's manifest file-mapping (matches Broker.cpp).
-const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
+const WCHAR* BROKER_MANIFEST_NAME = L"Local\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 
 // ---------------------------------------------------------------------------
 // Blit shaders

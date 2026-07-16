@@ -138,3 +138,8 @@ struct SourceState {
     HWND       hwnd        = nullptr;          // Target window handle (if mode == Window)
     int        cameraIndex = -1;               // Index into the camera enumeration list (if mode == Camera)
 };
+
+// Forward declarations from App.cpp
+void ShutdownSystem();
+bool IsRunningAsAdmin();
+void ElevateAndRelaunch();

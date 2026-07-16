@@ -99,8 +99,8 @@ HRESULT InitOutputResources()
 
     DWORD pid = GetCurrentProcessId();
     std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-    std::wstring textureName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-    std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+    std::wstring textureName = L"Local\\DirectPortTexture_" + std::to_wstring(pid);
+    std::wstring fenceName = L"Local\\DirectPortFence_" + std::to_wstring(pid);
 
     ComPtr<IDXGIResource1> r1; g_sharedOutTexture.As(&r1);
     RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, textureName.c_str(), &g_sharedOutTextureHandle));

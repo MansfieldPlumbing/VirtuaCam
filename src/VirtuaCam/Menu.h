@@ -39,6 +39,14 @@ public:
 
     int GetCalculatedWidth() const;
     int GetCalculatedHeight() const;
+    
+    // VOM-style handle registration for deterministic cleanup
+    void RegisterHandle();
+    void UnregisterHandle();
+    UINT GetHandleId() const { return m_handleId; }
+    
+    // Process-wide cleanup for handle table
+    static void CleanupHandles();
 
 private:
     void CalculateOptimalWidth();
@@ -48,6 +56,7 @@ private:
     void Draw(HDC hdc, HANDLE paintBuffer);   // HANDLE == HPAINTBUFFER (uxtheme)
     void CloseChildren();
     void HandleMouseMove(POINT clientPt);
+    static void SignalCloseEvent(UINT handleId);
 
     HWND m_hwnd;
     HWND m_parentHwnd;
@@ -62,4 +71,8 @@ private:
     CustomMenu* m_parentMenu = nullptr;
     CustomMenu* m_activeSubMenu = nullptr;
     int m_activeSubMenuItem = -1;
+    
+    // VOM handle tracking
+    UINT m_handleId;
+    UINT m_generation;
 };

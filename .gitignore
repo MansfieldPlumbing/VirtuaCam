@@ -1,0 +1,34 @@
+```
+# Build artifacts
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.exp
+*.ilk
+
+# Dependencies
+node_modules/
+vendor/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+```

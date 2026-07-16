@@ -214,15 +214,13 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
-    if (!IsRunningAsAdmin()) {
-        MessageBox(NULL, L"This application requires Administrator privileges to register the virtual camera.", L"Administrator Rights Required", MB_OK | MB_ICONERROR);
-        return 1;
-    }
+    bool isAdmin = IsRunningAsAdmin();
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
+    // 1. ALWAYS load the broker and D3D. Your app needs this regardless of privileges.
     if (FAILED(LoadBroker())) {
          MessageBox(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", MB_OK | MB_ICONERROR);
          MFShutdown(); CoUninitialize(); return 1;
@@ -251,10 +249,27 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         });
     }
 
-    if (FAILED(RegisterVirtualCamera())) {
-        MessageBox(g_hMainWnd, L"Failed to register and start the virtual camera.", L"Error", MB_OK | MB_ICONERROR);
+    // 2. ATTEMPT REGISTRATION
+    if (!isAdmin) {
+        // We are a standard user. Register via Modern API (MFCreateVirtualCamera with CurrentUser)
+        if (FAILED(RegisterVirtualCamera())) {
+            // Modern API failed (e.g., old OS). Ask to elevate.
+            if (MessageBox(g_hMainWnd, L"Modern user-mode camera failed to initialize. Relaunch as Administrator for legacy compatibility?", L"Elevation Required", MB_YESNO | MB_ICONWARNING) == IDYES) {
+                ElevateAndRelaunch();
+                ShutdownSystem(); MFShutdown(); CoUninitialize(); return 0;
+            }
+        }
+    } else {
+        // We are Admin. The legacy COM setup (HKLM) handles visibility. 
+        // Note: You can optionally still run RegisterVirtualCamera() here if you want dual-visibility.
+        if (FAILED(RegisterVirtualCamera())) {
+            MessageBox(g_hMainWnd, L"Failed to register and start the virtual camera.", L"Error", MB_OK | MB_ICONERROR);
+        }
     }
 
+    // 3. START THE LOOP
+    // Your producer "daemons" (VirtuaCamProcess.exe) will be naturally spawned here 
+    // by the user clicking menus and triggering SetSourceMode().
     UI_RunMessageLoop(OnIdle);
 
     ShutdownSystem();
@@ -363,6 +378,18 @@ bool IsRunningAsAdmin() {
         CloseHandle(hToken);
     }
     return fIsAdmin;
+}
+
+void ElevateAndRelaunch() {
+    WCHAR exePath[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePath, MAX_PATH)) {
+        SHELLEXECUTEINFOW sei = { sizeof(sei) };
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = exePath;
+        sei.nShow = SW_SHOWNORMAL;
+        ShellExecuteExW(&sei);
+    }
 }
 
 void LoadSettings() {

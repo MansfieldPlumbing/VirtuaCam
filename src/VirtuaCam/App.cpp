@@ -213,33 +213,59 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
     InformBroker();
 }
 
+// =============================================================================
+// Application Entry Point - wWinMain
+// =============================================================================
+// DESIGN PHILOSOPHY:
+// - NO hard admin requirement at startup (removed exit(1) anti-pattern)
+// - Always load broker/D3D pipeline regardless of privilege level
+// - Graceful fallback: modern API first, legacy elevation prompt only if needed
+// - Producer processes (VirtuaCamProcess.exe) are spawned on-demand via SetSourceMode()
+//
+// WHY THIS ARCHITECTURE?
+// - Standard users CAN run from Program Files (read/execute permission)
+// - Settings stored in HKCU/%LOCALAPPDATA% (user write access)
+// - Local\ namespace IPC avoids SeCreateGlobalPrivilege requirement
+// - Frame Server (LOCAL SERVICE) accesses handles via Creator-Consumer pattern
+// =============================================================================
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
+    // Check admin status ONLY for registration fallback logic, not for running the app
     bool isAdmin = IsRunningAsAdmin();
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
-    // 1. ALWAYS load the broker and D3D. Your app needs this regardless of privileges.
+    // =========================================================================
+    // STEP 1: ALWAYS INITIALIZE CORE PIPELINE
+    // =========================================================================
+    // The broker (DirectPortBroker.dll) is required in BOTH user and admin modes.
+    // It handles D3D11 compositing, producer discovery, and frame multiplexing.
+    // WITHOUT this, no frames are captured and the camera shows "NO SIGNAL".
+    // =========================================================================
     if (FAILED(LoadBroker())) {
          MessageBox(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", MB_OK | MB_ICONERROR);
          MFShutdown(); CoUninitialize(); return 1;
     }
 
+    // Initialize discovery system for finding producer manifests
     g_discovery = std::make_unique<VirtuaCam::Discovery>();
     ComPtr<ID3D11Device> tempDevice;
     if (SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, nullptr, 0, D3D11_SDK_VERSION, &tempDevice, nullptr, nullptr))) {
         g_discovery->Initialize(tempDevice.Get());
     }
 
+    // Initialize UI (system tray, message loop, preview window)
     UI_Initialize(hInstance, g_hMainWnd, g_pfnGetSharedTexture);
     if (!g_hMainWnd) {
         ShutdownSystem(); MFShutdown(); CoUninitialize(); return FALSE;
     }
 
+    // Timer for periodic discovery refresh and UI updates
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
     InformBroker();
 
+    // Initialize audio capture subsystem (WASAPI)
     g_audioCapture = std::make_unique<WASAPICapture>();
     if (SUCCEEDED(g_audioCapture->EnumerateCaptureDevices())) {
         UI_UpdateAudioDeviceLists(g_audioCapture->GetCaptureDeviceNames());
@@ -249,29 +275,51 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         });
     }
 
-    // 2. ATTEMPT REGISTRATION
+    // =========================================================================
+    // STEP 2: REGISTER VIRTUAL CAMERA WITH GRACEFUL FALLBACK
+    // =========================================================================
+    // MODERN PATH (Windows 11): MFCreateVirtualCamera with CurrentUser scope
+    //   - No admin required
+    //   - Camera visible to apps in current session
+    //   - Uses Media Foundation's built-in virtual camera support
+    //
+    // LEGACY PATH (Windows 10 or older): COM registration in HKLM
+    //   - Requires admin elevation
+    //   - Camera visible system-wide
+    //   - Fallback prompt shown only if modern API fails
+    // =========================================================================
     if (!isAdmin) {
-        // We are a standard user. Register via Modern API (MFCreateVirtualCamera with CurrentUser)
+        // Standard user: attempt modern MFCreateVirtualCamera API first
         if (FAILED(RegisterVirtualCamera())) {
-            // Modern API failed (e.g., old OS). Ask to elevate.
+            // Modern API failed (likely old OS without MFCreateVirtualCamera support)
+            // Prompt user for elevation to use legacy COM registration
             if (MessageBox(g_hMainWnd, L"Modern user-mode camera failed to initialize. Relaunch as Administrator for legacy compatibility?", L"Elevation Required", MB_YESNO | MB_ICONWARNING) == IDYES) {
                 ElevateAndRelaunch();
                 ShutdownSystem(); MFShutdown(); CoUninitialize(); return 0;
             }
+            // User declined elevation: continue in user-mode (may have limited visibility)
         }
     } else {
-        // We are Admin. The legacy COM setup (HKLM) handles visibility. 
-        // Note: You can optionally still run RegisterVirtualCamera() here if you want dual-visibility.
+        // Admin mode: legacy COM registration available
+        // Optionally could also call MFCreateVirtualCamera for dual-visibility
         if (FAILED(RegisterVirtualCamera())) {
             MessageBox(g_hMainWnd, L"Failed to register and start the virtual camera.", L"Error", MB_OK | MB_ICONERROR);
         }
     }
 
-    // 3. START THE LOOP
-    // Your producer "daemons" (VirtuaCamProcess.exe) will be naturally spawned here 
-    // by the user clicking menus and triggering SetSourceMode().
+    // =========================================================================
+    // STEP 3: RUN MESSAGE LOOP
+    // =========================================================================
+    // Producer processes are NOT started here. They are spawned on-demand when:
+    // - User selects a source from tray menu (SetSourceMode called)
+    // - Auto-discovery grid mode is selected
+    // - PIP sources are configured
+    // Each producer runs as a separate process (VirtuaCamProcess.exe) with its
+    // own capture logic (MFCamera, MFGraphicsCapture, or Consumer).
+    // =========================================================================
     UI_RunMessageLoop(OnIdle);
 
+    // Cleanup: shutdown all subsystems in reverse order
     ShutdownSystem();
     MFShutdown();
     CoUninitialize();

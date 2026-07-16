@@ -14,6 +14,24 @@
 //   4. If the broker is not running, show a static black "NO SIGNAL" frame.
 //   5. Optionally convert the RGB32 frame to NV12 via VideoProcessorMFT if
 //      the consumer has negotiated NV12 as the media type.
+//
+// CRITICAL DESIGN: Creator-Consumer Pattern for Cross-Session Access
+// -------------------------------------------------------------------
+// The Windows Camera Frame Server runs as LOCAL SERVICE in Session 0 (isolated).
+// Our user-mode broker runs in the user's session (Session 1+).
+//
+// HOW THIS WORKS WITHOUT ADMIN:
+//   1. CREATOR (Broker.cpp, user-mode): Creates shared texture/fence with
+//      permissive DACL "D:P(A;;GA;;;AU)" granting Authenticated Users access
+//   2. CONSUMER (This file, LOCAL SERVICE): Opens existing handles via
+//      OpenSharedResource1() - no SeCreateGlobalPrivilege needed
+//   3. Local\ Namespace: Handles exist in user session, but Frame Server can
+//      access them because it loads our DLL and inherits handle permissions
+//
+// WHY NOT Global\?
+//   - Global\ requires SeCreateGlobalPrivilege (admin-only)
+//   - Local\ works because Frame Server opens (not creates) the handles
+//   - Security is provided by the permissive DACL, not namespace isolation
 // =============================================================================
 
 #include "pch.h"

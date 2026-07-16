@@ -1,5 +1,5 @@
 // =============================================================================
-// Menu.cpp  --  Custom tray context menu
+// Menu.cpp  --  Custom tray context menu with VOM-style handle management
 // =============================================================================
 // A custom-drawn popup menu with a Windows 11 look:
 //   - Real DWM Mica/Acrylic: the window extends its frame into the client area
@@ -16,6 +16,36 @@
 // CustomMenuItem::subMenu unique_ptr and must NOT delete themselves -- their
 // windows are destroyed with the owner chain, but the objects die with the
 // parent.  (Deleting in both places was a heap-corrupting double delete.)
+//
+// VIRTUAL OBJECT MANAGER (VOM) PATTERN:
+// -------------------------------------
+// This file implements a kernel-mode-inspired handle table for menu objects to
+// solve DEADLOCK and FOCUS-SHIFT cleanup issues:
+//
+// PROBLEM: The original implementation had race conditions where:
+//   - User clicks away from menu -> focus shifts -> menu should close
+//   - But WM_KILLFOCUS arrived after other messages, causing stale pointers
+//   - UI thread blocked waiting for background threads holding menu references
+//   - Result: Deadlock or leaked menu windows floating on screen
+//
+// SOLUTION: Generational handle table (like Windows kernel object manager):
+//   - Each menu gets a unique handle ID (monotonically increasing counter)
+//   - HandleEntry contains: Menu pointer, RefCount, Generation, CloseEvent
+//   - Critical section protects the entire handle table (thread-safe)
+//   - CloseEvent (manual-reset) signals deterministic cleanup completion
+//   - Stale generations rejected O(1) - prevents use-after-free
+//
+// LIFECYCLE:
+//   1. Show() -> RegisterHandle() -> allocates ID, creates event, stores entry
+//   2. WM_KILLFOCUS -> CloseAllMenus() -> signals close events
+//   3. WM_DESTROY -> UnregisterHandle() -> signals event, removes from table
+//   4. Process shutdown -> CleanupHandles() -> ensures all events signaled
+//
+// WHY THIS WORKS:
+//   - No cross-thread blocking: handle table uses short critical section locks
+//   - Deterministic cleanup: events signal completion, no polling needed
+//   - Focus-shift safe: WM_KILLFOCUS triggers immediate cleanup cascade
+//   - Generational safety: old handle IDs fail validation after teardown
 // =============================================================================
 
 #include "pch.h"

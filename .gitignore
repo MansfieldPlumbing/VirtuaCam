@@ -1,46 +1,28 @@
-```
-# Compiled and binary files
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.a
-*.out
-
-# Build artifacts
-build/
-dist/
-target/
-
-# Dependencies
-node_modules/
-venv/
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-.gradle/
-
-# Editors/IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+```gitignore
+# Logs and temp files
+*.log
 *.tmp
+*.swp
 
-# System files
-.DS_Store
-Thumbs.db
+# Environment
 .env
 .env.local
 *.env.*
 
-# Logs
-*.log
+# Editors
+.vscode/
+.idea/
 
-# Coverage
-coverage/
-htmlcov/
-.coverage
+# PowerShell and batch files temp/cache
+*.ps1xml
+*.psc1
+*.psd1
+*.psm1
+
+# Setup and installer artifacts
+setup.log
+install.log
+
+# Original rules preserved
+*.log
 ```

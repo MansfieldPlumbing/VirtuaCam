@@ -1,23 +1,24 @@
 #Requires -Version 7.5
 # scripts/setup_preflight.ps1
-# Validates all build dependencies for VirtuaCam, discovers tool paths, writes config.ini.
+# Validates build dependencies for VirtuaCam via Targeted Probing.
 # Called by setup.ps1 - do not run directly.
+#
+# Strategy:
+# 1. Check PATH first (fastest).
+# 2. Check standard installation roots (C:\Program Files, C:\bin, etc.).
+# 3. Check VS internal paths for vcpkg.
+# NO recursive scanning, NO MFT raw access (requires Admin/AV triggers).
 
 param(
-    [Parameter(Mandatory)][string]       $ProjectRoot,
-    [Parameter(Mandatory)][string]       $ConfigFile,
-    [Parameter(Mandatory)][System.Collections.Specialized.OrderedDictionary] $Manifest
+    [Parameter(Mandatory)][string] $ProjectRoot,
+    [Parameter(Mandatory)][string] $ConfigFile
 )
 
 $ErrorActionPreference = "Continue"
 
 trap {
-    Write-Host ""
-    Write-Host "  Preflight hit an unexpected error:" -ForegroundColor Red
-    Write-Host "  $_" -ForegroundColor DarkYellow
-    Write-Host ""
-    Write-Host "  Press any key to return to menu..." -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    Write-Host "`n  [FATAL] Preflight encountered an unhandled exception:" -ForegroundColor Red
+    Write-Host "  $_`n" -ForegroundColor DarkYellow
     exit 1
 }
 
@@ -25,388 +26,205 @@ trap {
 # HELPERS
 # ---------------------------------------------------------------------------
 function Write-Check {
-    param(
-        [string]$Label,
-        [bool]  $Ok,
-        [string]$Detail = '',
-        [string]$Hint   = '',
-        [switch]$Info
-    )
+    param([string]$Label, [bool]$Ok, [string]$Detail = '', [string]$Hint = '')
     $pad    = 22
-    $status = if ($Info) { "[..]" } elseif ($Ok) { "[OK]" } else { "[!!]" }
-    $color  = if ($Info) { 'Cyan' } elseif ($Ok) { 'Green' } else { 'Red' }
+    $status = if ($Ok) { "[OK]" } else { "[!!]" }
+    $color  = if ($Ok) { 'Green' } else { 'Red' }
     Write-Host "  $status  $($Label.PadRight($pad)) $Detail" -ForegroundColor $color
-    if (-not $Ok -and -not $Info -and $Hint) {
+    if (-not $Ok -and $Hint) {
         Write-Host "         $(' ' * $pad) > $Hint" -ForegroundColor DarkYellow
     }
 }
 
-function Add-ToUserPath ([string[]]$Dirs) {
-    $current = [Environment]::GetEnvironmentVariable('PATH', 'User')
-    $toAdd   = @($Dirs | Where-Object { -not (Test-InPath $_) })
-    if ($toAdd.Count -eq 0) { return $false }
-    $newPath = ($current.TrimEnd(';') + ';' + ($toAdd -join ';')).TrimStart(';')
-    [Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')
-    $env:PATH = $env:PATH.TrimEnd(';') + ';' + ($toAdd -join ';')
-    return $true
-}
-
-function Test-InPath ([string]$Dir) {
-    $systemPath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
-    $userPath   = [Environment]::GetEnvironmentVariable('PATH', 'User')
-    return ($systemPath -like "*$Dir*") -or ($userPath -like "*$Dir*")
-}
-
-function Read-YN ([string]$Prompt) {
-    return (Read-Host $Prompt).Trim().ToUpper() -eq 'Y'
-}
-
-# Fast VS detection - checks common locations first, then uses vswhere
-function Find-VSBuildTools {
-    # Check if already in a developer command prompt
-    if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
-        return @{ Found = $true; Version = 'cl.exe in PATH'; VcVars = 'already active' }
-    }
-    
-    # Try vswhere with prerelease flag for VS 2026
-    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    
-    if (Test-Path $vswhere) {
-        $products = @(
-            'Microsoft.VisualStudio.Product.BuildTools',
-            'Microsoft.VisualStudio.Product.Community',
-            'Microsoft.VisualStudio.Product.Professional',
-            'Microsoft.VisualStudio.Product.Enterprise'
-        )
-        
-        foreach ($product in $products) {
-            try {
-                $info = & $vswhere -latest -prerelease -products $product `
-                            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-                            -format json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($info -and $info.installationPath) {
-                    $candidate = "$($info.installationPath)\VC\Auxiliary\Build\vcvars64.bat"
-                    if (Test-Path $candidate) {
-                        return @{ 
-                            Found = $true
-                            Version = $info.installationVersion
-                            Path = $info.installationPath
-                            VcVars = $candidate
-                        }
-                    }
-                }
-            } catch {}
-        }
-        
-        # Check if VS exists but without C++ workload
-        $anyVS = try { 
-            & $vswhere -latest -prerelease -products * -format json 2>$null | 
-            ConvertFrom-Json -ErrorAction SilentlyContinue 
-        } catch { $null }
-        
-        if ($anyVS -and $anyVS.installationPath) {
-            return @{ 
-                Found = $false
-                Version = $anyVS.installationVersion
-                Path = $anyVS.installationPath
-                MissingCpp = $true
-            }
-        }
-    }
-    
-    # Fallback: scan likely installation roots (fast targeted scan)
-    $likelyRoots = @(
-        "${env:ProgramFiles}\Microsoft Visual Studio",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio",
-        "C:\BuildTools",
-        "D:\BuildTools",
-        "C:\VS",
-        "D:\VS"
+function Find-Executable {
+    param(
+        [string]$Name,
+        [string[]]$ExtraPaths
     )
     
-    foreach ($root in $likelyRoots) {
-        if (Test-Path $root) {
-            $vcvars = Get-ChildItem -Path $root -Filter "vcvars64.bat" -Recurse -Depth 3 -ErrorAction SilentlyContinue | 
-                      Select-Object -First 1
-            if ($vcvars) {
-                return @{
-                    Found = $true
-                    Version = 'detected via scan'
-                    Path = (Split-Path $vcvars.DirectoryName -Parent)
-                    VcVars = $vcvars.FullName
-                }
-            }
-        }
+    # 1. Check PATH
+    $found = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($found) { return $found.Source }
+
+    # 2. Check Extra Paths (Targeted Probe)
+    foreach ($path in $ExtraPaths) {
+        if (Test-Path $path) { return $path }
     }
-    
-    return @{ Found = $false }
+
+    return $null
 }
 
-# Fast CMake detection
-function Find-CMake {
-    # Check PATH first
-    if (Get-Command cmake -ErrorAction SilentlyContinue) {
-        $cmakePath = (Get-Command cmake).Source
-        $version = (cmake --version 2>&1 | Select-Object -First 1)
-        if ($version -match '(\d+\.\d+\.\d+)') {
-            return @{ Found = $true; Exe = $cmakePath; Version = $Matches[1] }
-        }
+function Find-VcpkgRoot {
+    # vcpkg.exe lives in the root of the repo, not a bin folder usually
+    
+    # 1. Environment Variable
+    if ($env:VCPKG_ROOT) {
+        $exe = Join-Path $env:VCPKG_ROOT 'vcpkg.exe'
+        if (Test-Path $exe) { return $env:VCPKG_ROOT }
     }
-    
-    # Check common install locations
-    $commonPaths = @(
-        "${env:ProgramFiles}\CMake\bin\cmake.exe",
-        "${env:ProgramFiles(x86)}\CMake\bin\cmake.exe",
-        "$env:LOCALAPPDATA\Microsoft\WindowsApps\cmake.exe"
-    )
-    
-    foreach ($path in $commonPaths) {
-        if (Test-Path $path) {
-            $version = (& $path --version 2>&1 | Select-Object -First 1)
-            if ($version -match '(\d+\.\d+\.\d+)') {
-                return @{ Found = $true; Exe = $path; Version = $Matches[1] }
-            }
-        }
-    }
-    
-    # Check VS bundled CMake
-    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $vswhere) {
-        $vsCmake = & $vswhere -latest -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-                   -find "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" 2>$null
-        if ($vsCmake -and (Test-Path $vsCmake)) {
-            $version = (& $vsCmake --version 2>&1 | Select-Object -First 1)
-            if ($version -match '(\d+\.\d+\.\d+)') {
-                return @{ Found = $true; Exe = $vsCmake; Version = $Matches[1] }
-            }
-        }
-    }
-    
-    return @{ Found = $false }
-}
 
-# Fast vcpkg detection
-function Find-Vcpkg {
-    # Check common locations
-    $commonPaths = @(
+    # 2. Standard Locations
+    $probes = @(
         "C:\vcpkg\vcpkg.exe",
-        "$env:LOCALAPPDATA\vcpkg\vcpkg.exe",
+        "C:\bin\vcpkg\vcpkg.exe",
         "$env:USERPROFILE\vcpkg\vcpkg.exe",
-        "$env:USERPROFILE\scoop\apps\vcpkg\current\vcpkg.exe"
+        "$env:LOCALAPPDATA\vcpkg\vcpkg.exe"
     )
     
-    foreach ($path in $commonPaths) {
-        if (Test-Path $path) {
-            return @{ Found = $true; Exe = $path }
-        }
+    foreach ($path in $probes) {
+        if (Test-Path $path) { return Split-Path $path -Parent }
     }
-    
-    # Check if on PATH
-    if (Get-Command vcpkg -ErrorAction SilentlyContinue) {
-        return @{ Found = $true; Exe = (Get-Command vcpkg).Source }
+
+    # 3. Visual Studio Bundled vcpkg (Common in VS 2022/2026)
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vsWhere) {
+        try {
+            $vsInstalls = & $vsWhere -format json -products * | ConvertFrom-Json
+            foreach ($vs in $vsInstalls) {
+                $root = $vs.installationPath
+                $candidates = @(
+                    "$root\VC\vcpkg\vcpkg.exe",
+                    "$root\Common7\IDE\CommonExtensions\Microsoft\Vcpkg\vcpkg.exe"
+                )
+                foreach ($c in $candidates) {
+                    if (Test-Path $c) { return Split-Path $c -Parent }
+                }
+            }
+        } catch {}
     }
-    
-    return @{ Found = $false }
+
+    return $null
 }
 
 # ---------------------------------------------------------------------------
-# STATE
+# MAIN CHECKS
 # ---------------------------------------------------------------------------
-$allPassed = $true
-$cfg       = @{}
+Write-Host "`n  -- [2] Preflight Checks (Targeted Probe) ----------------------------------------`n" -ForegroundColor Cyan
 
-Write-Host ""
-Write-Host "  -- [2] Preflight Checks ----------------------------------------------------------" -ForegroundColor Cyan
-Write-Host ""
-
-# ===========================================================================
-# 1. WINGET
-# ===========================================================================
-$wingetOk  = $false
-$wingetVer = ''
-try {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        $raw = winget --version 2>&1
-        if ($raw -match 'v?(\d+[\.\d]+)') {
-            $wingetVer = $Matches[1]
-            $parts     = $wingetVer -split '\.' | Select-Object -First 2
-            $wingetOk  = [Version]($parts -join '.') -ge $Manifest['winget'].MinVersion
-        }
-    }
-} catch {}
-
-Write-Check 'winget' $wingetOk `
-    $(if ($wingetOk) { "v$wingetVer" } else { 'not found' }) `
-    -Hint "Install App Installer from Microsoft Store: ms-windows-store://pdp/?productid=9NBLGGH4NNS1"
-
-if (-not $wingetOk) {
-    $allPassed = $false
+$cfg = @{
+    vcvars     = $null
+    cmake_exe  = $null
+    vcpkg_root = $null
+    iscc_exe   = $null
 }
 
-# ===========================================================================
-# 2. VS BUILD TOOLS
-# ===========================================================================
-Write-Host ""
-$vsResult = Find-VSBuildTools
+$AllPassed = $true
 
-if ($vsResult.Found) {
-    Write-Check 'VS Build Tools' $true "$($vsResult.Version)"
-    $cfg['vcvars'] = $vsResult.VcVars
+# 1. VS Build Tools (vcvars64.bat)
+$vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vcvarsPath = $null
+
+if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
+    $vcvarsPath = "Active Developer Shell (cl.exe found)"
+} elseif (Test-Path $vsWhere) {
+    $vs = & $vsWhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json 2>$null | ConvertFrom-Json
+    if ($vs) {
+        $candidate = "$($vs.installationPath)\VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path $candidate) { $vcvarsPath = $candidate }
+    }
+}
+
+if (-not $vcvarsPath) {
+    $probes = @(
+        "C:\Program Files\Microsoft Visual Studio\2026\Community\VC\Auxiliary\Build\vcvars64.bat",
+        "C:\Program Files\Microsoft Visual Studio\2026\Professional\VC\Auxiliary\Build\vcvars64.bat",
+        "C:\Program Files (x86)\Microsoft Visual Studio\2026\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
+        "C:\bin\vs\VC\Auxiliary\Build\vcvars64.bat"
+    )
+    foreach ($p in $probes) {
+        if (Test-Path $p) { $vcvarsPath = $p; break }
+    }
+}
+
+if ($vcvarsPath) {
+    Write-Check 'VS Build Tools' $true $vcvarsPath
+    $cfg['vcvars'] = $vcvarsPath
 } else {
-    $detail = 'not found'
-    if ($vsResult.MissingCpp) {
-        $detail = "$($vsResult.Version) - C++ workload missing"
-    }
-    
-    Write-Check 'VS Build Tools' $false $detail
-    
-    if ($vsResult.MissingCpp) {
-        Write-Host ""
-        Write-Host "  Visual Studio is installed but the C++ workload is missing." -ForegroundColor DarkYellow
-        Write-Host "  Open Visual Studio Installer > Modify > check:" -ForegroundColor DarkYellow
-        Write-Host "    'Desktop development with C++'" -ForegroundColor White
-    } else {
-        Write-Host ""
-        Write-Host "  Install VS 2022 Build Tools (or full VS with C++ workload):" -ForegroundColor DarkYellow
-        Write-Host "    winget install Microsoft.VisualStudio.2022.BuildTools ``" -ForegroundColor White
-        Write-Host "      --override '--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'" -ForegroundColor White
-        Write-Host "  Or: $($Manifest['buildtools'].Url)" -ForegroundColor White
-    }
-    $allPassed = $false
+    Write-Check 'VS Build Tools' $false 'vcvars64.bat not found' 'Install VS 2022/2026 with "Desktop development with C++"'
+    $AllPassed = $false
 }
 
-# ===========================================================================
-# 3. CMAKE
-# ===========================================================================
-Write-Host ""
-$cmakeResult = Find-CMake
+# 2. CMake
+$cmakeProbes = @(
+    "C:\Program Files\CMake\bin\cmake.exe",
+    "C:\bin\cmake\bin\cmake.exe",
+    "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Kitware.CMake\cmake.exe"
+)
+if (Test-Path "$env:LOCALAPPDATA\micromamba") {
+    $mambaCmake = Get-ChildItem "$env:LOCALAPPDATA\micromamba\envs\*\Scripts\cmake.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($mambaCmake) { $cmakeProbes += $mambaCmake.FullName }
+}
 
-if ($cmakeResult.Found) {
-    $cmakeOk = [Version]$cmakeResult.Version -ge $Manifest['cmake'].MinVersion
-    Write-Check 'CMake' $cmakeOk "$($cmakeResult.Version) - $($cmakeResult.Exe)"
-    if ($cmakeOk) {
-        $cfg['cmake_exe'] = $cmakeResult.Exe
-    }
+$cmakeExe = Find-Executable 'cmake.exe' -ExtraPaths $cmakeProbes
+
+if ($cmakeExe) {
+    Write-Check 'CMake' $true $cmakeExe
+    $cfg['cmake_exe'] = $cmakeExe
 } else {
-    Write-Check 'CMake' $false 'not found'
-    Write-Host ""
-    Write-Host "  CMake can be installed via winget or downloaded from:" -ForegroundColor DarkYellow
-    Write-Host "    winget install Kitware.CMake" -ForegroundColor White
-    Write-Host "    $($Manifest['cmake'].Url)" -ForegroundColor White
-    $allPassed = $false
+    Write-Check 'CMake' $false 'cmake.exe not found' 'winget install Kitware.CMake'
+    $AllPassed = $false
 }
 
-# ===========================================================================
-# 4. VCPKG
-# ===========================================================================
-Write-Host ""
-$vcpkgResult = Find-Vcpkg
+# 3. vcpkg
+$vcpkgRoot = Find-VcpkgRoot
 
-if ($vcpkgResult.Found) {
-    Write-Check 'vcpkg' $true "$($vcpkgResult.Exe)" -Info
-    $cfg['vcpkg_root'] = Split-Path $vcpkgResult.Exe
+if ($vcpkgRoot) {
+    Write-Check 'vcpkg' $true $vcpkgRoot
+    $cfg['vcpkg_root'] = $vcpkgRoot
 } else {
-    Write-Check 'vcpkg' $false 'not found' -Info
-    Write-Host "         $(' ' * 22) Can be cloned during [3] Install dependencies" -ForegroundColor DarkGray
+    Write-Check 'vcpkg' $false 'vcpkg.exe not found' 'Clone to C:\vcpkg or set VCPKG_ROOT'
+    $AllPassed = $false
 }
 
-# ===========================================================================
-# 5. .NET SDK
-# ===========================================================================
-Write-Host ""
-$dotnetOk  = $false
-$dotnetVer = ''
+# 4. Inno Setup (ISCC.exe) - OPTIONAL
+$isccProbes = @(
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    "C:\bin\inno\ISCC.exe"
+)
+$isccExe = Find-Executable 'ISCC.exe' -ExtraPaths $isccProbes
 
-try {
-    if (Get-Command dotnet -ErrorAction SilentlyContinue) {
-        $raw = dotnet --version 2>&1
-        if ($raw -match '(\d+\.\d+)') {
-            $dotnetVer = $Matches[1]
-            $dotnetOk  = [Version]$dotnetVer -ge $Manifest['dotnet'].MinVersion
-        }
-    }
-} catch {}
-
-Write-Check '.NET SDK' $dotnetOk `
-    $(if ($dotnetOk) { $dotnetVer } elseif ($dotnetVer) { "$dotnetVer (need >= $($Manifest['dotnet'].MinVersion))" } else { 'not found' }) `
-    -Hint "winget install $($Manifest['dotnet'].WingetId)"
-
-if (-not $dotnetOk) {
-    $allPassed = $false
+if ($isccExe) {
+    Write-Check 'Inno Setup' $true $isccExe
+    $cfg['iscc_exe'] = $isccExe
+} else {
+    Write-Check 'Inno Setup' $false 'ISCC.exe not found' 'Optional: winget install JRSoftware.InnoSetup'
 }
 
-# ===========================================================================
-# 6. INNO SETUP
-# ===========================================================================
-Write-Host ""
-$innoOk = $false
-$innoVer = ''
+# ---------------------------------------------------------------------------
+# SUMMARY & CONFIG
+# ---------------------------------------------------------------------------
+Write-Host "`n  -----------------------------------------------------------------------------------`n" -ForegroundColor DarkGray
 
-try {
-    $innoPath = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-    if (Test-Path $innoPath) {
-        $innoOk = $true
-        $innoVer = '6.x'
-    } elseif (Get-Command ISCC -ErrorAction SilentlyContinue) {
-        $innoOk = $true
-        $innoVer = 'found on PATH'
-    }
-} catch {}
+$Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
-Write-Check 'Inno Setup' $innoOk `
-    $(if ($innoOk) { $innoVer } else { 'not found' }) `
-    -Hint "winget install $($Manifest['inno'].WingetId)"
-
-if (-not $innoOk) {
-    $allPassed = $false
-}
-
-# ===========================================================================
-# SUMMARY + WRITE config.ini
-# ===========================================================================
-Write-Host ""
-Write-Host "  -----------------------------------------------------------------------------------" -ForegroundColor DarkGray
-Write-Host ""
-
-if ($allPassed) {
-    Write-Host "  [OK] All checks passed." -ForegroundColor Green
-    Write-Host ""
-
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+if ($AllPassed) {
+    Write-Host "  [OK] Preflight validation completed successfully.`n" -ForegroundColor Green
 
 @"
 ; VirtuaCam - machine config
-; Generated by setup_preflight.ps1 on $timestamp
+; Generated by setup_preflight.ps1 on $Timestamp
 ; Do not commit - see .gitignore
-; Re-run [2] Preflight to regenerate.
 
 [machine]
 preflight_passed  = true
-preflight_date    = $timestamp
+preflight_date    = $Timestamp
 vcvars            = $($cfg['vcvars'])
 cmake_exe         = $($cfg['cmake_exe'])
 vcpkg_root        = $($cfg['vcpkg_root'])
+iscc_exe          = $($cfg['iscc_exe'])
 "@ | Set-Content $ConfigFile -Encoding UTF8
 
-    Write-Host "  + config.ini written." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  You can now proceed to [4] Build." -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  Press any key to return to menu..." -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-
+    Write-Host "  + Configuration written to: $ConfigFile" -ForegroundColor DarkGray
 } else {
-    Write-Host "  [!!] One or more checks failed." -ForegroundColor Red
-    Write-Host "       Resolve the items above and re-run [2] Preflight." -ForegroundColor Yellow
-    Write-Host "       [3] Install dependencies can handle winget-installable items." -ForegroundColor Yellow
-
-    # stamp config.ini so Build stays gated
+    Write-Host "  [!!] Core dependencies are missing.`n" -ForegroundColor Red
+    Write-Host "       Note: Inno Setup is optional (only for creating installer).`n" -ForegroundColor DarkGray
+    
     if (Test-Path $ConfigFile) {
-        $content = (Get-Content $ConfigFile -Raw) -replace 'preflight_passed\s*=\s*true', 'preflight_passed = false'
-        $content | Set-Content $ConfigFile -Encoding UTF8
+        $Content = (Get-Content $ConfigFile -Raw) -replace 'preflight_passed\s*=\s*true', 'preflight_passed = false'
+        $Content | Set-Content $ConfigFile -Encoding UTF8
     }
-
-    Write-Host ""
-    Write-Host "  Press any key to return to menu..." -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
+
+Write-Host "`n  Press any key to return to menu..." -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")

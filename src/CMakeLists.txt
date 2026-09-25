@@ -1,180 +1,87 @@
 # =============================================================================
-# CMakeLists.txt  --  VirtuaCam build definition
+# VirtuaCam
 # =============================================================================
-#
-# Build targets (in dependency order):
-#   VirtuaCamCommon         - Static library: shared utilities, GPU helpers, formats
-#   DirectPortClient        - DLL: virtual camera COM object (registered via regsvr32)
-#   DirectPortBroker        - DLL: GPU-compositing broker; composites producer frames
-#   DirectPortMFCamera      - DLL: producer that captures from a physical webcam
-#   DirectPortMFGraphicsCapture - DLL: producer that captures a window or the desktop
-#   DirectPortConsumer      - DLL: example consumer/producer (reads broker, re-exports)
-#   VirtuaCam               - EXE: system-tray controller app
-#   VirtuaCamProcess        - EXE: thin launcher that loads a producer DLL in its own process
-#
-# Custom CMake targets:
-#   register_vcam           - Run regsvr32 /s on DirectPortClient.dll  (needs Admin)
-#   unregister_vcam         - Run regsvr32 /u /s on DirectPortClient.dll (needs Admin)
+#   VirtuaCamCommon   static   shared-frame IPC, D3D11 helpers
+#   VirtuaCamSource   DLL      Media Foundation virtual camera (loaded by the
+#                              Windows Camera Frame Server; regsvr32 once)
+#   VirtuaCam         EXE      tray app, broker/compositor, and -- when run
+#                              with --producer -- the built-in producers
 # =============================================================================
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(VirtuaCam LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS ON)
-
-# Use the static (non-DLL) CRT so binaries are self-contained.
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# --- External dependencies (via vcpkg) ---
-find_package(wil CONFIG REQUIRED)       # Windows Implementation Library: smart ptrs, HRESULT macros
-set(VCAM_VCPKG_LIBS WIL::WIL)
+# --- Windows Implementation Library (header only) ----------------------------
+# Uses an installed package (e.g. vcpkg) when present, otherwise fetches the
+# headers; nothing else is required beyond Visual Studio and the Windows SDK.
+find_package(wil CONFIG QUIET)
+if(NOT TARGET WIL::WIL)
+    include(FetchContent)
+    FetchContent_Declare(wil
+        URL https://github.com/microsoft/wil/archive/refs/tags/v1.0.250325.1.tar.gz
+        SOURCE_SUBDIR do-not-configure)
+    FetchContent_MakeAvailable(wil)
+    add_library(WIL::WIL INTERFACE IMPORTED)
+    target_include_directories(WIL::WIL INTERFACE "${wil_SOURCE_DIR}/include")
+endif()
 
-# --- Windows SDK library groups ---
-# Media Foundation: virtual camera source, MFT format conversion, device enumeration
-set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
-# Direct3D / DXGI / D2D: GPU rendering, shared textures, fences
-set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
-# Core Windows: COM, shell, registry, audio, sync primitives.
-# runtimeobject provides RoGetActivationFactory/RoInitialize for the raw-ABI
-# Windows.Graphics.Capture access in DirectPortMFGraphicsCapture.
-set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi avrt strmiids)
+add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+if(MSVC)
+    add_compile_options(/W4 /permissive- /utf-8 /Zc:__cplusplus)
+endif()
 
-# =============================================================================
-# VirtuaCamCommon  --  static library shared by all other targets
-# =============================================================================
+# --- Common -----------------------------------------------------------------
 add_library(VirtuaCamCommon STATIC
-    VirtuaCam/Tools.cpp         # String/GUID utilities, YUV conversion, registry helpers, "No Signal" frame
-    VirtuaCam/Guids.cpp         # COM GUID definitions (INITGUID must be defined here only)
-    VirtuaCam/Formats.cpp       # Supported resolution + frame-rate combinations
-    VirtuaCam/Discovery.cpp     # IPC: scans running processes for producer shared-memory manifests
-)
-# Guids.cpp must be compiled without the precompiled header because it
-# defines INITGUID, which must appear exactly once across the entire binary.
-set_source_files_properties(VirtuaCam/Guids.cpp PROPERTIES SKIP_PRECOMPILE_HEADER ON)
-target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_VCPKG_LIBS} ${VCAM_MF_LIBS} ${VCAM_D3D_LIBS} ${VCAM_WIN_LIBS})
-target_compile_definitions(VirtuaCamCommon PRIVATE UNICODE _UNICODE)
+    Common/SharedFrame.cpp
+    Common/Gpu.cpp)
+target_include_directories(VirtuaCamCommon PUBLIC Common)
+target_link_libraries(VirtuaCamCommon PUBLIC WIL::WIL d3d11 d3d12 dxgi d3dcompiler advapi32)
 
-# =============================================================================
-# DirectPortClient  --  virtual camera COM DLL
-# =============================================================================
-# This is the DLL that Windows registers as a webcam via regsvr32.
-# It implements IMFMediaSource2/IMFMediaStream2 and pulls frames from the broker.
-add_library(DirectPortClient SHARED
-    VirtuaCam/MFClient.cpp
-    VirtuaCam/BrokerClient.cpp
-    VirtuaCam/pch.cpp
-    VirtuaCam/pch.h
-)
-set(DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/DirectPortClient.def")
-file(WRITE ${DEF_FILE} "LIBRARY DirectPortClient\nEXPORTS\n    DllCanUnloadNow PRIVATE\n    DllGetClassObject PRIVATE\n    DllRegisterServer PRIVATE\n    DllUnregisterServer PRIVATE\n")
-set_target_properties(DirectPortClient PROPERTIES
-    OUTPUT_NAME "DirectPortClient"
-    LINK_FLAGS "/DEF:${DEF_FILE}"
-)
-target_link_libraries(DirectPortClient PRIVATE VirtuaCamCommon)
-target_compile_definitions(DirectPortClient PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
-target_precompile_headers(DirectPortClient PRIVATE VirtuaCam/pch.h)
+# --- Virtual camera media source --------------------------------------------
+add_library(VirtuaCamSource SHARED
+    Camera/CameraModule.cpp
+    Camera/CameraSource.cpp
+    Camera/CameraRenderer.cpp
+    Camera/VirtuaCamSource.def)
+target_link_libraries(VirtuaCamSource PRIVATE VirtuaCamCommon mfplat mfuuid mf mfsensorgroup runtimeobject)
 
-# =============================================================================
-# DirectPortBroker  --  GPU compositing broker DLL
-# =============================================================================
-# Loaded dynamically by VirtuaCam.exe at runtime.
-# Owns the shared output texture+fence and runs the Multiplexer each frame.
-add_library(DirectPortBroker SHARED
-    VirtuaCam/Broker.cpp
-    VirtuaCam/Multiplexer.cpp
-)
-set_target_properties(DirectPortBroker PROPERTIES OUTPUT_NAME "DirectPortBroker")
-target_link_libraries(DirectPortBroker PRIVATE VirtuaCamCommon)
-target_compile_definitions(DirectPortBroker PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
-
-# =============================================================================
-# DirectPortMFCamera  --  physical webcam producer DLL
-# =============================================================================
-# Loaded by VirtuaCamProcess.exe with --type camera.
-# Reads frames from a system camera via Media Foundation and publishes
-# them to a named shared texture for the broker to composite.
-add_library(DirectPortMFCamera SHARED
-    VirtuaCam/MFCamera.cpp
-    VirtuaCam/pch.cpp
-)
-set_target_properties(DirectPortMFCamera PROPERTIES OUTPUT_NAME "DirectPortMFCamera")
-target_link_libraries(DirectPortMFCamera PRIVATE VirtuaCamCommon)
-target_compile_definitions(DirectPortMFCamera PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
-target_precompile_headers(DirectPortMFCamera PRIVATE VirtuaCam/pch.h)
-
-# =============================================================================
-# DirectPortMFGraphicsCapture  --  window/desktop capture producer DLL
-# =============================================================================
-# Loaded by VirtuaCamProcess.exe with --type capture.
-# Uses the Windows.Graphics.Capture API to capture a target window (--hwnd)
-# or the full desktop and publishes frames to a named shared texture.
-add_library(DirectPortMFGraphicsCapture SHARED
-    VirtuaCam/MFGraphicsCapture.cpp
-    VirtuaCam/pch.cpp
-)
-set_target_properties(DirectPortMFGraphicsCapture PROPERTIES OUTPUT_NAME "DirectPortMFGraphicsCapture")
-target_link_libraries(DirectPortMFGraphicsCapture PRIVATE VirtuaCamCommon)
-target_compile_definitions(DirectPortMFGraphicsCapture PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
-target_precompile_headers(DirectPortMFGraphicsCapture PRIVATE VirtuaCam/pch.h)
-
-# =============================================================================
-# DirectPortConsumer  --  example consumer/re-publisher DLL
-# =============================================================================
-# Loaded by VirtuaCamProcess.exe with --type consumer.
-# Reads the broker's output texture, applies a shader transformation
-# (colour inversion by default), and re-publishes the result as a new producer.
-add_library(DirectPortConsumer SHARED
-    VirtuaCam/Consumer.cpp
-    VirtuaCam/pch.cpp
-)
-set_target_properties(DirectPortConsumer PROPERTIES OUTPUT_NAME "DirectPortConsumer")
-target_link_libraries(DirectPortConsumer PRIVATE VirtuaCamCommon)
-target_compile_definitions(DirectPortConsumer PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
-target_precompile_headers(DirectPortConsumer PRIVATE VirtuaCam/pch.h)
-
-# =============================================================================
-# VirtuaCam  --  system-tray controller executable
-# =============================================================================
-# The main user-facing application.  Lives in the system tray and lets the
-# user choose which source(s) feed the virtual camera.
+# --- Tray application and producers -----------------------------------------
 add_executable(VirtuaCam WIN32
-    VirtuaCam/App.cpp
-    VirtuaCam/UI.cpp
-    VirtuaCam/Menu.cpp
-    VirtuaCam/WASAPI.cpp
-    VirtuaCam/App.rc
-)
-set_target_properties(VirtuaCam PROPERTIES OUTPUT_NAME "VirtuaCam")
-target_link_libraries(VirtuaCam PRIVATE VirtuaCamCommon)
-target_compile_definitions(VirtuaCam PRIVATE UNICODE _UNICODE)
-target_precompile_headers(VirtuaCam PRIVATE VirtuaCam/pch.h)
+    App/Main.cpp
+    App/TrayApp.cpp
+    App/Menu.cpp
+    App/PreviewWindow.cpp
+    App/Presenter.cpp
+    App/Settings.cpp
+    App/ProducerHost.cpp
+    App/Broker.cpp
+    App/Compositor.cpp
+    App/Discovery.cpp
+    App/ProducerMain.cpp
+    App/CameraProducer.cpp
+    App/CaptureProducer.cpp
+    App/Whiteboard.cpp
+    App/App.rc)
+target_link_libraries(VirtuaCam PRIVATE VirtuaCamCommon
+    mfplat mfuuid mf mfreadwrite mfsensorgroup
+    d2d1 dcomp dwmapi uxtheme msimg32 comctl32 shcore shell32 user32 ole32 runtimeobject)
+# The manifest (per-monitor DPI, common controls v6) comes from App.rc.
+target_link_options(VirtuaCam PRIVATE /MANIFEST:NO)
 
-# =============================================================================
-# VirtuaCamProcess  --  producer process launcher
-# =============================================================================
-# A minimal Win32 process that loads one producer DLL and runs its frame loop.
-# Launched by VirtuaCam.exe with --type <camera|capture|consumer> [args...].
-add_executable(VirtuaCamProcess WIN32
-    VirtuaCam/Process.cpp
-    VirtuaCam/Process.rc
-)
-set_target_properties(VirtuaCamProcess PROPERTIES OUTPUT_NAME "VirtuaCamProcess")
-target_link_libraries(VirtuaCamProcess PRIVATE VirtuaCamCommon)
-target_compile_definitions(VirtuaCamProcess PRIVATE UNICODE _UNICODE)
+# Keep everything the installer needs in one folder.
+set_target_properties(VirtuaCamSource VirtuaCam PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
 
-# =============================================================================
-# COM registration helpers
-# =============================================================================
-add_custom_target(register_vcam
-    COMMAND regsvr32 /s "$<TARGET_FILE:DirectPortClient>"
-    DEPENDS DirectPortClient
-    COMMENT "Registering DirectPortClient.dll as a virtual camera (requires Admin)..."
-)
-add_custom_target(unregister_vcam
-    COMMAND regsvr32 /u /s "$<TARGET_FILE:DirectPortClient>"
-    DEPENDS DirectPortClient
-    COMMENT "Unregistering DirectPortClient.dll (requires Admin)..."
-)
+# --- Convenience targets (need an elevated shell) ----------------------------
+add_custom_target(register_camera
+    COMMAND regsvr32 /s "$<TARGET_FILE:VirtuaCamSource>"
+    DEPENDS VirtuaCamSource
+    COMMENT "Registering VirtuaCamSource.dll")
+add_custom_target(unregister_camera
+    COMMAND regsvr32 /u /s "$<TARGET_FILE:VirtuaCamSource>"
+    COMMENT "Unregistering VirtuaCamSource.dll")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates src/VirtuaCam/NoSignalMask.h — an alpha mask of the "NO SIGNAL"
+"""Generates src/Common/NoSignalMask.h — an alpha mask of the "NO SIGNAL"
 wordmark, rastered from the Selawik typeface (SIL OFL 1.1, (c) Microsoft).
 
 The mask is what ships; the font itself is not embedded or redistributed.
@@ -50,4 +50,4 @@ def main(font_path: str, out_path: str) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else "selawk.ttf",
-         "src/VirtuaCam/NoSignalMask.h")
+         "src/Common/NoSignalMask.h")

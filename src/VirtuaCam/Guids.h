@@ -1,5 +1,0 @@
-#pragma once
-#include <guiddef.h>
-
-// The CLSID under which the virtual camera media source is registered.
-DEFINE_GUID(CLSID_VCam, 0x08675309, 0xf283, 0x4af4, 0xa3, 0xb2, 0x6f, 0x53, 0x63, 0x30, 0x9f, 0x52);
